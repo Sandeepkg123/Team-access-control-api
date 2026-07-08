@@ -1,5 +1,6 @@
 const Team = require("../models/Team");
 const TeamMember = require("../models/TeamMember");
+const User = require("../models/User");
 
 // CREATE TEAM
 const createTeam = async (req, res) => {
@@ -56,4 +57,69 @@ const deleteTeam = async (req, res) => {
   }
 };
 
-module.exports = { createTeam, getTeam, getMyTeams, deleteTeam };
+
+
+// ADD MEMBER
+const addMember = async (req, res) => {
+  try {
+    const { teamId } = req.params;
+    const { email, role } = req.body;
+
+    const user = await User.findOne({ email });
+    if (!user) {
+      return res.status(404).json({ error: "User not found" });
+    }
+
+    const existingMembership = await TeamMember.findOne({ teamId, userId: user._id });
+    if (existingMembership) {
+      return res.status(400).json({ error: "User is already a member of this team" });
+    }
+
+    const membership = await TeamMember.create({
+      teamId,
+      userId: user._id,
+      role: role || "member", // default to "member" if not specified
+    });
+
+    res.status(201).json({ message: "Member added", membership });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+};
+
+// LIST MEMBERS
+const listMembers = async (req, res) => {
+  try {
+    const { teamId } = req.params;
+
+    const members = await TeamMember.find({ teamId }).populate("userId", "name email");
+
+    res.status(200).json({ members });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+};
+
+// REMOVE MEMBER
+const removeMember = async (req, res) => {
+  try {
+    const { teamId, userId } = req.params;
+
+    const membership = await TeamMember.findOne({ teamId, userId });
+    if (!membership) {
+      return res.status(404).json({ error: "Membership not found" });
+    }
+
+    if (membership.role === "owner") {
+      return res.status(400).json({ error: "Cannot remove the team owner" });
+    }
+
+    await TeamMember.findByIdAndDelete(membership._id);
+
+    res.status(200).json({ message: "Member removed" });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+};
+
+module.exports = { createTeam, getTeam, getMyTeams, deleteTeam, addMember, listMembers, removeMember };
