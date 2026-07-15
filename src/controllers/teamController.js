@@ -84,6 +84,7 @@ const addMember = async (req, res) => {
     res.status(201).json({ message: "Member added", membership });
   } catch (err) {
     res.status(500).json({ error: err.message });
+    
   }
 };
 
