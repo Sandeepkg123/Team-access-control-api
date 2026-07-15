@@ -123,4 +123,43 @@ const removeMember = async (req, res) => {
   }
 };
 
-module.exports = { createTeam, getTeam, getMyTeams, deleteTeam, addMember, listMembers, removeMember };
+
+// TRANSFER OWNERSHIP
+const transferOwnership = async (req, res) => {
+  try {
+    const { teamId } = req.params;
+    const { newOwnerUserId } = req.body;
+    const currentOwnerId = req.user.id;
+
+    // Confirm the target is actually a member of this team
+    const newOwnerMembership = await TeamMember.findOne({ teamId, userId: newOwnerUserId });
+    if (!newOwnerMembership) {
+      return res.status(404).json({ error: "Target user is not a member of this team" });
+    }
+
+    if (newOwnerMembership.role === "owner") {
+      return res.status(400).json({ error: "This user is already the owner" });
+    }
+
+    // Demote current owner to admin
+    await TeamMember.findOneAndUpdate(
+      { teamId, userId: currentOwnerId },
+      { role: "admin" }
+    );
+
+    // Promote target to owner
+    newOwnerMembership.role = "owner";
+    await newOwnerMembership.save();
+
+    // Keep Team.ownerId in sync (our denormalized shortcut from Step 3)
+    await Team.findByIdAndUpdate(teamId, { ownerId: newOwnerUserId });
+
+    res.status(200).json({ message: "Ownership transferred successfully" });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+};
+
+module.exports = { createTeam, getTeam, getMyTeams, deleteTeam, addMember, listMembers, removeMember, transferOwnership };
+
+
