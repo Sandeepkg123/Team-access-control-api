@@ -3,6 +3,7 @@ const cors = require("cors");
 const cookieParser = require("cookie-parser");
 const authRoutes = require("./routes/authRoutes");
 const teamRoutes = require("./routes/teamRoutes");
+const errorHandler = require("./middleware/errorHandler");
 
 const app = express();
 
@@ -15,6 +16,7 @@ app.use(cors({
 
 app.use("/auth", authRoutes);
 app.use("/teams", teamRoutes);
+app.use(errorHandler);
 
 
 

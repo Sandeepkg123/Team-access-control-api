@@ -4,12 +4,13 @@ const { createProject, listProjects, updateProject, deleteProject } = require(".
 const authenticate = require("../middleware/authenticate");
 const requireTeamMember = require("../middleware/requireTeamMember");
 const requireRole = require("../middleware/requireRole");
+const validateObjectId = require("../middleware/validateObjectId");
 
 router.use(authenticate);
 
 router.post("/", requireTeamMember, createProject);
 router.get("/", requireTeamMember, listProjects);
-router.patch("/:projectId", requireTeamMember, updateProject);
-router.delete("/:projectId", requireTeamMember, requireRole(["owner", "admin"]), deleteProject);
+router.patch("/:projectId", validateObjectId("projectId"), requireTeamMember, updateProject);
+router.delete("/:projectId", validateObjectId("projectId"), requireTeamMember, requireRole(["owner", "admin"]), deleteProject);
 
 module.exports = router;
