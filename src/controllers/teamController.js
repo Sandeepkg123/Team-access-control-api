@@ -27,7 +27,7 @@ const getTeam = async (req, res) => {
   try {
     const team = await Team.findById(req.params.teamId);
     if (!team) return res.status(404).json({ error: "Team not found" });
-    res.status(200).json({ team });
+    res.status(200).json({ team, role: req.membership.role });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }

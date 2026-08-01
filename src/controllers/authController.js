@@ -70,7 +70,11 @@ const refresh = async (req, res) => {
     }
 
     const newAccessToken = generateAccessToken(user._id);
-    res.status(200).json({ accessToken: newAccessToken });
+    res.status(200).json({ 
+      accessToken: newAccessToken,
+      userId: user._id,     
+      name: user.name   
+     });
   } catch (err) {
     res.status(403).json({ error: "Invalid or expired refresh token" });
   }
