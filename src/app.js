@@ -14,6 +14,14 @@ app.use(cors({
   credentials: true                 // allows cookies to be sent cross-origin
 }));
 
+app.get("/health", (req, res) => {
+  res.status(200).json({
+    status: "ok",
+    message: "Backend is running correctly",
+    timestamp: new Date().toISOString()
+  });
+});
+
 app.use("/auth", authRoutes);
 app.use("/teams", teamRoutes);
 app.use(errorHandler);
