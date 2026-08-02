@@ -10,7 +10,7 @@ const app = express();
 app.use(express.json());        // parses JSON body of incoming requests
 app.use(cookieParser());        // parses cookies (for refresh token later)
 app.use(cors({
-  origin: "team-access-control-frontend.vercel.app", // your future frontend
+  origin: "https://team-access-control-frontend.vercel.app", // your future frontend
   credentials: true                 // allows cookies to be sent cross-origin
 }));
 
