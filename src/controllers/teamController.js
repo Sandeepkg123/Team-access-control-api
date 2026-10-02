@@ -75,10 +75,18 @@ const addMember = async (req, res) => {
       return res.status(400).json({ error: "User is already a member of this team" });
     }
 
+    // An admin may only grant "member". Only an owner may grant "admin"/"owner".
+    // Without this clamp, an admin can POST role:"owner" and mint an owner for
+    // an account they control (signup has no email verification), taking over a
+    // team that isn't theirs. req.membership.role is set by requireTeamMember,
+    // so this needs no extra query.
+    const requested = ["owner", "admin"].includes(role) ? role : "member";
+    const assigned = req.membership.role === "owner" ? requested : "member";
+
     const membership = await TeamMember.create({
       teamId,
       userId: user._id,
-      role: role || "member", // default to "member" if not specified
+      role: assigned,
     });
 
     res.status(201).json({ message: "Member added", membership });
