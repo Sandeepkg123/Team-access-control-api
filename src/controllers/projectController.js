@@ -33,10 +33,12 @@ const listProjects = async (req, res) => {
 // UPDATE PROJECT
 const updateProject = async (req, res) => {
   try {
-    const { projectId } = req.params;
+    const { teamId, projectId } = req.params;
     const { title, description } = req.body;
 
-    const project = await Project.findById(projectId);
+    // Scope the lookup by BOTH ids: a projectId from another team simply won't
+    // match. Returns 404 rather than 403 so we don't confirm the id exists elsewhere.
+    const project = await Project.findOne({ _id: projectId, teamId });
     if (!project) return res.status(404).json({ error: "Project not found" });
 
     const isOwnerOrAdmin = ["owner", "admin"].includes(req.membership.role);
@@ -59,11 +61,11 @@ const updateProject = async (req, res) => {
 // DELETE PROJECT
 const deleteProject = async (req, res) => {
   try {
-    const { projectId } = req.params;
-    const project = await Project.findById(projectId);
+    const { teamId, projectId } = req.params;
+    const project = await Project.findOne({ _id: projectId, teamId });
     if (!project) return res.status(404).json({ error: "Project not found" });
 
-    await Project.findByIdAndDelete(projectId);
+    await Project.findByIdAndDelete(project._id);
     res.status(200).json({ message: "Project deleted" });
   } catch (err) {
     res.status(500).json({ error: err.message });
