@@ -212,16 +212,71 @@ The fastest way to *feel* the permission system:
 
 That single 403 is the entire project in one response.
 
-## Known Issues
+## Security Fixes Applied
 
-An honest list of what is currently weak:
+Issues found during a security review, each fixed with a failing-test-first
+workflow and verified by reverting the fix to confirm the tests catch it.
 
-1. **Cross-team project access.** `updateProject` and `deleteProject` fetch by `projectId` but never verify `project.teamId === req.params.teamId`. A `member` of Team A can pass their own valid teamId and modify Team B's projects — `requireTeamMember` only proves membership of the *URL's* team, not the *resource's*. **Fix:** compare `teamId` in both handlers.
-2. **Privilege escalation via `addMember`.** `role` is taken straight from the request body, so an admin can add another member with `role: "owner"`. **Fix:** clamp the requested role unless the caller is the owner.
-3. **No input validation on member routes.** `addMember` / `transferOwnership` bodies are not run through `express-validator`, unlike auth.
-4. **`errorHandler` is effectively dead code** — every controller catches its own errors and returns `err.message`, leaking internals even in production. Centralize error handling instead.
-5. **Ownership transfer is not transactional** — three sequential writes (demote, promote, sync `Team.ownerId`) can leave inconsistent state on failure. Wrap in a MongoDB session/transaction.
-6. **Route ordering matters silently.** `/my-teams` must stay declared before `/:teamId`, or Express matches it as an ID.
+1. **Cross-team project access (IDOR) — fixed.** `updateProject` and
+   `deleteProject` loaded projects by `projectId` alone, never checking which
+   team owned them. Owning any team was enough to edit or delete any project in
+   the database. Both now query `Project.findOne({ _id, teamId })` and return
+   404 rather than 403 so the response cannot confirm that an id exists
+   elsewhere.
+2. **Privilege escalation via `addMember` — fixed.** `role` came straight from
+   the request body while the route only required owner or admin, so an admin
+   could mint an owner for an account they controlled. Admins may now grant only
+   `member`; owners may grant `admin` or `owner`.
+3. **Orphaned projects on team deletion — fixed.** `deleteTeam` removed the team
+   and its memberships but left every `Project` pointing at a team that no
+   longer existed — unreachable over HTTP yet stored forever. All three deletes
+   now run via `Promise.all`.
+4. **Dead error handler / internals leaked in production — fixed.** Every
+   controller caught its own errors and returned `err.message`, so
+   `errorHandler` was unreachable and its production redaction never ran. All
+   controllers now call `next(err)`; `errorHandler` maps duplicate-key,
+   validation, and cast failures onto safe 4xx responses and redacts the rest.
+5. **Unvalidated request bodies — fixed.** `addMember` and `transferOwnership`
+   had no validators, so a missing email or a malformed `newOwnerUserId` reached
+   Mongoose and surfaced as a 500. Both are now checked in
+   `validators/memberValidators.js`.
+6. **Refresh tokens did not rotate — fixed.** `refresh` issued a new access
+   token but left the presented refresh token valid for its full 7 days, so a
+   leaked one stayed usable indefinitely. Rotation now happens on every use.
+   Refresh tokens also carry a `jti`, because without one two tokens minted in
+   the same second were byte-identical.
+
+### Still open
+
+7. **Ownership transfer is not transactional** — three sequential writes
+   (demote, promote, sync `Team.ownerId`) can leave inconsistent state if the
+   process dies mid-way. Wrap in a MongoDB session.
+8. **No email verification on signup** — which is what made issue 2 exploitable.
+   An invite-only flow would remove the class of attack entirely.
+9. **Route ordering is fragile.** `/my-teams` must stay declared before
+   `/:teamId`. There is now a comment in `teamRoutes.js` warning about this.
+
+## Testing
+
+`test.js` contains 64 assertions covering the permission matrix, each security
+fix above, and regression checks. It uses Node's built-in `fetch`, so there are
+**no dependencies to install**.
+
+```bash
+npm run dev    # terminal 1
+npm test       # terminal 2
+```
+
+It creates throwaway users with randomized emails, exercises the API, then
+deletes everything it made — scoped by a per-run timestamp so real accounts are
+never touched. Output is `PASS`/`FAIL` per check, and the exit code is non-zero
+if anything fails, so it works in CI.
+
+Every security check was confirmed to fail when its fix was reverted, so a green
+run is meaningful rather than a test that always agrees.
+
+> If you see `429 Too many login attempts`, restart `npm run dev` — the limiter
+> allows 5 logins per 15 minutes and its counter is in-memory.
 
 ## Possible Next Steps
 
