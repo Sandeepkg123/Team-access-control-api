@@ -1,7 +1,7 @@
 const Project = require("../models/Project");
 
 // CREATE PROJECT
-const createProject = async (req, res) => {
+const createProject = async (req, res, next) => {
   try {
     const { teamId } = req.params;
     const { title, description } = req.body;
@@ -15,23 +15,23 @@ const createProject = async (req, res) => {
 
     res.status(201).json({ message: "Project created", project });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    next(err);
   }
 };
 
 // LIST PROJECTS FOR A TEAM
-const listProjects = async (req, res) => {
+const listProjects = async (req, res, next) => {
   try {
     const { teamId } = req.params;
     const projects = await Project.find({ teamId }).populate("createdBy", "name email");
     res.status(200).json({ projects });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    next(err);
   }
 };
 
 // UPDATE PROJECT
-const updateProject = async (req, res) => {
+const updateProject = async (req, res, next) => {
   try {
     const { teamId, projectId } = req.params;
     const { title, description } = req.body;
@@ -54,12 +54,12 @@ const updateProject = async (req, res) => {
 
     res.status(200).json({ message: "Project updated", project });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    next(err);
   }
 };
 
 // DELETE PROJECT
-const deleteProject = async (req, res) => {
+const deleteProject = async (req, res, next) => {
   try {
     const { teamId, projectId } = req.params;
     const project = await Project.findOne({ _id: projectId, teamId });
@@ -68,7 +68,7 @@ const deleteProject = async (req, res) => {
     await Project.findByIdAndDelete(project._id);
     res.status(200).json({ message: "Project deleted" });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    next(err);
   }
 };
 
