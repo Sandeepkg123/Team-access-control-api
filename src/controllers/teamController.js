@@ -1,5 +1,6 @@
 const Team = require("../models/Team");
 const TeamMember = require("../models/TeamMember");
+const Project = require("../models/Project");
 const User = require("../models/User");
 
 // CREATE TEAM
@@ -48,10 +49,21 @@ const deleteTeam = async (req, res) => {
   try {
     const { teamId } = req.params;
 
-    await Team.findByIdAndDelete(teamId);
-    await TeamMember.deleteMany({ teamId }); // cleanup all memberships too
+    // Cascade: delete the team's projects as well as its memberships. Without
+    // this, deleting a team left Project rows pointing at a team that no longer
+    // exists — unreachable over HTTP (every route 403s on the missing team) but
+    // still sitting in the collection forever.
+    // Parallel, so all three run concurrently rather than in series.
+    const [, , projectResult] = await Promise.all([
+      Team.findByIdAndDelete(teamId),
+      TeamMember.deleteMany({ teamId }),
+      Project.deleteMany({ teamId }),
+    ]);
 
-    res.status(200).json({ message: "Team deleted" });
+    res.status(200).json({
+      message: "Team deleted",
+      deletedProjects: projectResult.deletedCount,
+    });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }

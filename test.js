@@ -54,6 +54,29 @@ async function api(method, path, { token, body } = {}) {
   return { status: res.status, json };
 }
 
+// Shared Mongoose handle. Needed because some bugs (orphaned projects) have no
+// API surface that can observe them — a deleted team's projects are unreachable
+// over HTTP by design, so we must inspect the database directly.
+let _db = null;
+async function connectDb() {
+  if (_db) return _db;
+  // Atlas SRV lookups fail on some Windows resolvers; src/config/db.js pins
+  // Google DNS for the same reason. Do the same here or connect() throws
+  // querySrv ECONNREFUSED.
+  require("dns").setServers(["8.8.8.8", "8.8.4.4"]);
+  require("dotenv").config({ quiet: true });
+  const mongoose = require("mongoose");
+  const [Team, TeamMember, Project, User] = await Promise.all([
+    require("./src/models/Team"),
+    require("./src/models/TeamMember"),
+    require("./src/models/Project"),
+    require("./src/models/User"),
+  ]);
+  await mongoose.connect(process.env.MONGO_URI, { serverSelectionTimeoutMS: 8000 });
+  _db = { mongoose, Team, TeamMember, Project, User };
+  return _db;
+}
+
 const signup = (u) => api("POST", "/auth/signup", { body: u });
 const login = async (email, password) => {
   const r = await api("POST", "/auth/login", { body: { email, password } });
@@ -242,6 +265,68 @@ async function main() {
   const noRole = await addToA(tokenA, `ghost+${stamp}@test.com`, undefined);
   check("unknown email still 404s", noRole.status, 404);
 
+  // -------------------------------------------- STEP 3: orphaned projects
+  //
+  // deleteTeam removed the Team and its TeamMember rows but never touched
+  // Project. Deleting a team therefore left behind projects pointing at a team
+  // that no longer exists — invisible over HTTP (the team is gone, so every
+  // route 403s) but still occupying the collection forever.
+  //
+  // Verified directly against Mongo, because there is no API that can observe an
+  // orphan: that is precisely what makes the bug easy to miss.
+  group("SECURITY: deleting a team must not orphan its projects");
+
+  // A dedicated team so this cannot disturb the Team A/B assertions above.
+  const teamCRes = await api("POST", "/teams", { token: tokenA, body: { name: "Team C" } });
+  check("alice creates team C 201", teamCRes.status, 201);
+  const teamC = teamCRes.json.team?._id;
+
+  const projC1 = await api("POST", `/teams/${teamC}/projects`, {
+    token: tokenA,
+    body: { title: "C project one" },
+  });
+  check("team C project one 201", projC1.status, 201);
+  const projC2 = await api("POST", `/teams/${teamC}/projects`, {
+    token: tokenA,
+    body: { title: "C project two" },
+  });
+  check("team C project two 201", projC2.status, 201);
+
+  const beforeDelete = await api("GET", `/teams/${teamC}/projects`, { token: tokenA });
+  check("team C has 2 projects before delete", beforeDelete.json.projects?.length, 2);
+
+  const delTeamC = await api("DELETE", `/teams/${teamC}`, { token: tokenA });
+  check("team C deleted 200", delTeamC.status, 200);
+  check("delete reports cascaded project count", delTeamC.json.deletedProjects, 2);
+
+  // Team and memberships go via the API; projects must go too.
+  const goneTeam = await api("GET", `/teams/${teamC}`, { token: tokenA });
+  check("team C is gone", goneTeam.status, 403);
+
+  const orphans = await connectDb().then((db) =>
+    db.Project.countDocuments({ teamId: teamC })
+  );
+  check("no projects orphaned by team deletion", orphans, 0);
+
+  const leftoverMembers = await connectDb().then((db) =>
+    db.TeamMember.countDocuments({ teamId: teamC })
+  );
+  check("no memberships orphaned by team deletion", leftoverMembers, 0);
+
+  // REGRESSION: deleting a team must not touch projects belonging to OTHER teams.
+  const teamAStillHas = await api("POST", `/teams/${teamA}/projects`, {
+    token: tokenA,
+    body: { title: "survives team C deletion" },
+  });
+  check("team A project still created after C deleted", teamAStillHas.status, 201);
+  const teamAProjects = await api("GET", `/teams/${teamA}/projects`, { token: tokenA });
+  check(
+    "team A project unaffected by C cascade",
+    teamAProjects.json.projects?.some((p) => p._id === teamAStillHas.json.project?._id),
+    true
+  );
+  await api("DELETE", `/teams/${teamA}/projects/${teamAStillHas.json.project?._id}`, { token: tokenA });
+
   // ----------------------------------------------------------------- teardown
   // There is no DELETE /auth/users endpoint, so we clean up straight through
   // Mongoose. Everything is scoped by the unique stamp in the test emails, so
@@ -249,21 +334,7 @@ async function main() {
   // failure must never be mistaken for a test failure.
   group("Teardown");
   try {
-    require("dotenv").config({ quiet: true });
-    const mongoose = require("mongoose");
-    const [Team, TeamMember, Project, User] = await Promise.all([
-      require("./src/models/Team"),
-      require("./src/models/TeamMember"),
-      require("./src/models/Project"),
-      require("./src/models/User"),
-    ]);
-
-    // Atlas SRV lookups fail on some Windows resolvers; src/config/db.js pins
-    // Google DNS for the same reason. Do the same here or connect() throws
-    // querySrv ECONNREFUSED.
-    require("dns").setServers(["8.8.8.8", "8.8.4.4"]);
-
-    await mongoose.connect(process.env.MONGO_URI, { serverSelectionTimeoutMS: 8000 });
+    const { mongoose, Team, TeamMember, Project, User } = await connectDb();
 
     const pattern = new RegExp(`\\+${stamp}[a-z0-9]*@`);
     const users = await User.find({ email: pattern }, { _id: 1 }).lean();
