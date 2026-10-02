@@ -4,7 +4,7 @@ const Project = require("../models/Project");
 const User = require("../models/User");
 
 // CREATE TEAM
-const createTeam = async (req, res) => {
+const createTeam = async (req, res, next) => {
   try {
     const { name } = req.body;
     const userId = req.user.id;
@@ -19,33 +19,33 @@ const createTeam = async (req, res) => {
 
     res.status(201).json({ message: "Team created", team });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    next(err);
   }
 };
 
 // GET TEAM BY ID
-const getTeam = async (req, res) => {
+const getTeam = async (req, res, next) => {
   try {
     const team = await Team.findById(req.params.teamId);
     if (!team) return res.status(404).json({ error: "Team not found" });
     res.status(200).json({ team, role: req.membership.role });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    next(err);
   }
 };
 
 // GET ALL TEAMS FOR LOGGED-IN USER
-const getMyTeams = async (req, res) => {
+const getMyTeams = async (req, res, next) => {
   try {
     const memberships = await TeamMember.find({ userId: req.user.id }).populate("teamId");
     res.status(200).json({ teams: memberships });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    next(err);
   }
 };
 
 // DELETE TEAM
-const deleteTeam = async (req, res) => {
+const deleteTeam = async (req, res, next) => {
   try {
     const { teamId } = req.params;
 
@@ -65,14 +65,14 @@ const deleteTeam = async (req, res) => {
       deletedProjects: projectResult.deletedCount,
     });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    next(err);
   }
 };
 
 
 
 // ADD MEMBER
-const addMember = async (req, res) => {
+const addMember = async (req, res, next) => {
   try {
     const { teamId } = req.params;
     const { email, role } = req.body;
@@ -103,13 +103,13 @@ const addMember = async (req, res) => {
 
     res.status(201).json({ message: "Member added", membership });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    next(err);
     
   }
 };
 
 // LIST MEMBERS
-const listMembers = async (req, res) => {
+const listMembers = async (req, res, next) => {
   try {
     const { teamId } = req.params;
 
@@ -117,12 +117,12 @@ const listMembers = async (req, res) => {
 
     res.status(200).json({ members });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    next(err);
   }
 };
 
 // REMOVE MEMBER
-const removeMember = async (req, res) => {
+const removeMember = async (req, res, next) => {
   try {
     const { teamId, userId } = req.params;
 
@@ -139,13 +139,13 @@ const removeMember = async (req, res) => {
 
     res.status(200).json({ message: "Member removed" });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    next(err);
   }
 };
 
 
 // TRANSFER OWNERSHIP
-const transferOwnership = async (req, res) => {
+const transferOwnership = async (req, res, next) => {
   try {
     const { teamId } = req.params;
     const { newOwnerUserId } = req.body;
@@ -176,7 +176,7 @@ const transferOwnership = async (req, res) => {
 
     res.status(200).json({ message: "Ownership transferred successfully" });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    next(err);
   }
 };
 

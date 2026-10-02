@@ -39,9 +39,11 @@ function group(name) {
   console.log("-".repeat(60));
 }
 
-async function api(method, path, { token, body } = {}) {
+async function api(method, path, { token, body, cookie } = {}) {
   const headers = { "Content-Type": "application/json" };
   if (token) headers.Authorization = `Bearer ${token}`;
+  // Manual cookie so we can replay an OLD refresh token after rotation.
+  if (cookie) headers.Cookie = cookie;
   const res = await fetch(`${BASE}${path}`, {
     method,
     headers,
@@ -51,7 +53,9 @@ async function api(method, path, { token, body } = {}) {
   try {
     json = await res.json();
   } catch {}
-  return { status: res.status, json };
+  // res itself is returned so tests can read Set-Cookie (needed for refresh
+  // token rotation). Note fetch() gives one combined set-cookie header.
+  return { status: res.status, json, headers: res.headers, res };
 }
 
 // Shared Mongoose handle. Needed because some bugs (orphaned projects) have no
@@ -326,6 +330,117 @@ async function main() {
     true
   );
   await api("DELETE", `/teams/${teamA}/projects/${teamAStillHas.json.project?._id}`, { token: tokenA });
+
+  // ================================================ STEP 4: error handling
+  //
+  // Every controller caught its own errors and returned err.message directly,
+  // which made middleware/errorHandler.js unreachable — so its production
+  // redaction never ran and raw Mongo errors leaked to clients. These checks
+  // assert that a DB-level failure surfaces as a safe status with no internals.
+  group("SECURITY: database errors must not leak internals");
+
+  // Duplicate email at the model layer: signup's own 400 guard catches the
+  // common case, but a race hits the unique index and used to return a 500
+  // containing the raw Mongo message.
+  const dupe = await signup(alice);
+  check("duplicate email is a 4xx, not 500", dupe.status >= 400 && dupe.status < 500, true);
+  check(
+    "duplicate email leaks no internals",
+    /E11000|duplicate key|MongoServerError|MongoError/.test(JSON.stringify(dupe.json)),
+    false
+  );
+
+  // Add a member with a role that violates the schema enum. The user must exist
+  // first, otherwise addMember 404s before the role is ever considered.
+  const badRoleUser = { name: "Rita", email: `rita+${stamp}${rand}@test.com`, password: "Secret123!" };
+  await signup(badRoleUser);
+  const badRole = await addToA(tokenA, badRoleUser.email, "superadmin");
+  check("invalid role rejected", badRole.status, 400);
+  check(
+    "invalid role leaks no internals",
+    /ValidationError|enum|MongoServerError/.test(JSON.stringify(badRole.json)),
+    false
+  );
+
+  // A malformed ObjectId in a BODY param used to throw CastError -> 500.
+  const badId = await api("PATCH", `/teams/${teamA}/transfer-ownership`, {
+    token: tokenA,
+    body: { newOwnerUserId: "not-an-object-id" },
+  });
+  check("malformed body ObjectId is 400, not 500", badId.status, 400);
+  check(
+    "malformed id leaks no internals",
+    /CastError|ObjectId|MongoServerError/.test(JSON.stringify(badId.json)),
+    false
+  );
+
+  // A malformed ObjectId in a URL param is already guarded by validateObjectId.
+  const badUrlId = await api("GET", `/teams/garbage-not-an-id`, { token: tokenA });
+  check("malformed URL ObjectId is 400", badUrlId.status, 400);
+
+  // Missing required field -> Mongoose ValidationError must be a 400.
+  const noTitle = await api("POST", `/teams/${teamA}/projects`, { token: tokenA, body: {} });
+  check("missing required field is 400", noTitle.status, 400);
+  check(
+    "validation error leaks no internals",
+    /ValidationError|MongoServerError/.test(JSON.stringify(noTitle.json)),
+    false
+  );
+
+  // ================================================ STEP 6: refresh rotation
+  //
+  // refresh() issued a new access token but left the original refresh token
+  // valid for its full 7 days, so a leaked one stayed usable indefinitely.
+  group("SECURITY: refresh token must rotate on use");
+
+  const rotLogin = await api("POST", "/auth/login", {
+    body: { email: erin.email, password: erin.password },
+  });
+  check("login for rotation test 200", rotLogin.status, 200);
+  const rotCookie = rotLogin.headers.get("set-cookie") || "";
+  const rotToken = /refreshToken=([^;]+)/.exec(rotCookie)?.[1];
+  check("refresh cookie was issued", typeof rotToken, "string");
+
+  const rot1 = await api("POST", "/auth/refresh", {
+    cookie: `refreshToken=${rotToken}`,
+  });
+  check("refresh with valid cookie 200", rot1.status, 200);
+
+  // The cookie we were just given should differ from the one just consumed.
+  const rotNewCookie = rot1.headers.get("set-cookie") || "";
+  const rotNewToken = /refreshToken=([^;]+)/.exec(rotNewCookie)?.[1];
+  check("rotation issues a NEW refresh token", rotNewToken !== undefined && rotNewToken !== rotToken, true);
+
+  // Replaying the consumed token must now fail.
+  const rotReplay = await api("POST", "/auth/refresh", {
+    cookie: `refreshToken=${rotToken}`,
+  });
+  check("replayed refresh token is rejected", rotReplay.status, 403);
+
+  // The new token still works.
+  const rot2 = await api("POST", "/auth/refresh", {
+    cookie: `refreshToken=${rotNewToken}`,
+  });
+  check("rotated token still works", rot2.status, 200);
+
+  // Logout must invalidate whatever token is currently stored.
+  const currentCookie = rot2.headers.get("set-cookie") || "";
+  const currentToken = /refreshToken=([^;]+)/.exec(currentCookie)?.[1] ?? rotNewToken;
+  await api("POST", "/auth/logout", { cookie: `refreshToken=${currentToken}` });
+  const afterLogout = await api("POST", "/auth/refresh", {
+    cookie: `refreshToken=${currentToken}`,
+  });
+  check("refresh token invalid after logout", afterLogout.status, 403);
+
+  // ================================================ STEP 5: body validation
+  group("Validation: member route bodies are checked");
+  const noBody = await api("POST", `/teams/${teamA}/members`, { token: tokenA, body: {} });
+  check("addMember with no email is 400", noBody.status, 400);
+  const badTransfer = await api("PATCH", `/teams/${teamA}/transfer-ownership`, {
+    token: tokenA,
+    body: {},
+  });
+  check("transfer-ownership with no target is 400", badTransfer.status, 400);
 
   // ----------------------------------------------------------------- teardown
   // There is no DELETE /auth/users endpoint, so we clean up straight through

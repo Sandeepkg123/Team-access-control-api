@@ -4,7 +4,7 @@ const User = require("../models/User");
 const { generateAccessToken, generateRefreshToken } = require("../utils/generateToken");
 
 // SIGNUP
-const signup = async (req, res) => {
+const signup = async (req, res, next) => {
   try {
     const { name, email, password } = req.body;
 
@@ -18,12 +18,12 @@ const signup = async (req, res) => {
 
     res.status(201).json({ message: "User created", userId: user._id });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    next(err);
   }
 };
 
 // LOGIN
-const login = async (req, res) => {
+const login = async (req, res, next) => {
   try {
     const { email, password } = req.body;
 
@@ -52,7 +52,7 @@ const login = async (req, res) => {
 
     res.status(200).json({ accessToken, userId: user._id, name: user.name });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    next(err);
   }
 };
 
@@ -70,18 +70,36 @@ const refresh = async (req, res) => {
     }
 
     const newAccessToken = generateAccessToken(user._id);
-    res.status(200).json({ 
+
+    // Rotate the refresh token on every use. Without this the presented token
+    // stayed valid for its full 7 days, so a leaked one remained usable
+    // indefinitely even after the real user refreshed. Invalidating the old one
+    // means a stolen token stops working the moment the legitimate user next
+    // refreshes.
+    const newRefreshToken = generateRefreshToken(user._id);
+    user.refreshToken = newRefreshToken;
+    await user.save();
+
+    res.cookie("refreshToken", newRefreshToken, {
+      httpOnly: true,
+      secure: process.env.NODE_ENV === "production",
+      sameSite: "strict",
+      maxAge: 7 * 24 * 60 * 60 * 1000,
+    });
+
+    res.status(200).json({
       accessToken: newAccessToken,
-      userId: user._id,     
-      name: user.name   
-     });
+      userId: user._id,
+      name: user.name,
+    });
+
   } catch (err) {
     res.status(403).json({ error: "Invalid or expired refresh token" });
   }
 };
 
 // LOGOUT
-const logout = async (req, res) => {
+const logout = async (req, res, next) => {
   try {
     const token = req.cookies.refreshToken;
     if (token) {
@@ -90,7 +108,7 @@ const logout = async (req, res) => {
     res.clearCookie("refreshToken");
     res.status(200).json({ message: "Logged out" });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    next(err);
   }
 };
 
