@@ -25,6 +25,9 @@ router.get("/:teamId/members", validateObjectId("teamId"), requireTeamMember, li
 router.delete("/:teamId/members/:userId", validateObjectId("teamId"), validateObjectId("userId"), requireTeamMember, requireRole(["owner", "admin"]), removeMember);
 router.patch("/:teamId/transfer-ownership", validateObjectId("teamId"), requireTeamMember, requireRole(["owner"]), transferOwnershipValidator, validate, transferOwnership);
 
-router.use("/:teamId/projects", projectRoutes);
+// teamId must be validated here, not left to the nested router: projectRoutes
+// only ever sees its own :projectId, so a malformed teamId (e.g. /teams/nope/
+// projects) reached requireTeamMember and blew up as a 500 instead of a 400.
+router.use("/:teamId/projects", validateObjectId("teamId"), projectRoutes);
 
 module.exports = router;

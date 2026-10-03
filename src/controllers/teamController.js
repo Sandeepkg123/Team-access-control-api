@@ -7,7 +7,9 @@ const User = require("../models/User");
 // CREATE TEAM
 const createTeam = async (req, res, next) => {
   try {
-    const { name } = req.body;
+    // Express 5 leaves req.body undefined (not {}) when no body was sent, so
+    // destructuring it directly threw a TypeError and surfaced as a 500.
+    const { name } = req.body || {};
     const userId = req.user.id;
 
     // Two writes that must both land. If the membership insert failed, the team
@@ -113,7 +115,7 @@ const deleteTeam = async (req, res, next) => {
 const addMember = async (req, res, next) => {
   try {
     const { teamId } = req.params;
-    const { email, role } = req.body;
+    const { email, role } = req.body || {};
 
     const user = await User.findOne({ email });
     if (!user) {
@@ -204,7 +206,7 @@ const removeMember = async (req, res, next) => {
 const transferOwnership = async (req, res, next) => {
   try {
     const { teamId } = req.params;
-    const { newOwnerUserId } = req.body;
+    const { newOwnerUserId } = req.body || {};
     const currentOwnerId = req.user.id;
 
     // Transferring to yourself would demote the only owner and then re-promote

@@ -4,7 +4,9 @@ const Project = require("../models/Project");
 const createProject = async (req, res, next) => {
   try {
     const { teamId } = req.params;
-    const { title, description } = req.body;
+    // No validator runs ahead of this route, so a request with no body reaches
+    // here with req.body undefined (Express 5) and threw a TypeError -> 500.
+    const { title, description } = req.body || {};
 
     const project = await Project.create({
       title,
@@ -34,7 +36,9 @@ const listProjects = async (req, res, next) => {
 const updateProject = async (req, res, next) => {
   try {
     const { teamId, projectId } = req.params;
-    const { title, description } = req.body;
+    // Same undefined-body guard as createProject. A bodyless PATCH is a valid
+    // no-op, not a crash.
+    const { title, description } = req.body || {};
 
     // Scope the lookup by BOTH ids: a projectId from another team simply won't
     // match. Returns 404 rather than 403 so we don't confirm the id exists elsewhere.
