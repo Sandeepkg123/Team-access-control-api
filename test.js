@@ -619,6 +619,115 @@ const bobId = bob.userId ?? promoteBob.json.membership?.userId;
     ]);
   });
 
+  // ============================================ password truncation (bcrypt 72B)
+  //
+  // bcrypt hashes at most 72 bytes and silently discards the rest. Signup had
+  // no maximum, so "A"*100 and "A"*72 hashed identically and BOTH logged into
+  // the same account — the stored password was never the one the user chose.
+  // bcrypt counts bytes, not characters, so a short emoji password can also
+  // exceed the limit.
+  group("SECURITY: passwords must not be silently truncated");
+
+  const longPw = "A".repeat(100);
+  const longEmail = `long${stamp}@test.com`;
+  const longSignup = await api("POST", "/auth/signup", {
+    body: { name: "Long", email: longEmail, password: longPw },
+  });
+  check("signup rejects a 100-character password", longSignup.status, 400);
+
+  // Exactly at the limit must still be accepted, or the cap is too tight.
+  const edge = `edge${stamp}@test.com`;
+  const edgeSignup = await api("POST", "/auth/signup", {
+    body: { name: "Edge", email: edge, password: "B".repeat(72) },
+  });
+  check("signup accepts exactly 72 characters", edgeSignup.status, 201);
+  const edgeLogin = await api("POST", "/auth/login", { body: { email: edge, password: "B".repeat(72) } });
+  check("72-character password authenticates", edgeLogin.status, 200);
+  const edgeShort = await api("POST", "/auth/login", { body: { email: edge, password: "B".repeat(71) } });
+  check("a 71-character prefix does NOT authenticate", edgeShort.status, 401);
+
+  // Emoji: 30 four-byte characters = 120 bytes, over the limit despite being
+  // well under 72 characters.
+  const emojiSignup = await api("POST", "/auth/signup", {
+    body: { name: "Emoji", email: `emoji${stamp}@test.com`, password: "🔒".repeat(30) },
+  });
+  check("signup rejects an over-long multi-byte password", emojiSignup.status, 400);
+
+  // A normal-length password still works.
+  const normal = `norm${stamp}@test.com`;
+  check("normal password accepted", (await api("POST", "/auth/signup", { body: { name: "N", email: normal, password: "Secret123!" } })).status, 201);
+  check("normal password authenticates", (await api("POST", "/auth/login", { body: { email: normal, password: "Secret123!" } })).status, 200);
+
+  // ================================ admins must not remove peer admins
+  group("SECURITY: an admin cannot remove another admin");
+  // Bob is the owner at this point, so he must do the granting — alice is only an
+  // admin and admins may not hand out the admin role.
+  const peer = { name: "Peer", email: `peer${stamp}@test.com`, password: "Secret123!" };
+  await signup(peer);
+  await addToA(bobToken, peer.email, "admin");
+  const peerToken = await login(peer.email, peer.password);
+  check("owner granted peer the admin role",
+    (await api("GET", `/teams/${teamA}/members`, { token: bobToken })).json.members
+      ?.find((m) => m.userId?.email === peer.email)?.role, "admin");
+
+  // Ownership was transferred to bob earlier, so BOB is the owner and ALICE was
+  // demoted to admin. Alice is therefore the admin attacker here.
+  const membersNow = await api("GET", `/teams/${teamA}/members`, { token: bobToken });
+  const peerId = membersNow.json.members?.find((m) => m.userId?.email === peer.email)?.userId?._id;
+  check("peer admin exists", typeof peerId, "string");
+
+  const aliceRole = (await api("GET", `/teams/${teamA}`, { token: tokenA })).json.role;
+  check("alice is now an admin", aliceRole, "admin");
+
+  const peerRemoved = await api("DELETE", `/teams/${teamA}/members/${peerId}`, { token: tokenA });
+  check("admin cannot remove a peer admin", peerRemoved.status, 403);
+
+  const peerStill = await api("GET", `/teams/${teamA}/members`, { token: bobToken });
+  check("peer admin survived", peerStill.json.members?.some((m) => m.userId?._id === peerId), true);
+
+  // The owner still can.
+  const ownerRemoves = await api("DELETE", `/teams/${teamA}/members/${peerId}`, { token: bobToken });
+  check("owner CAN remove an admin", ownerRemoves.status, 200);
+
+  // ================================ fields must be clearable to empty string
+  group("BEHAVIOUR: an empty string must clear a field, not be ignored");
+  const clrTeam = (await api("POST", "/teams", { token: bobToken, body: { name: "Clear Test" } })).json.team?._id;
+  const clrProj = (
+    await api("POST", `/teams/${clrTeam}/projects`, {
+      token: bobToken,
+      body: { title: "Has desc", description: "original text" },
+    })
+  ).json.project;
+  check("project starts with a description", clrProj?.description, "original text");
+
+  const cleared = await api("PATCH", `/teams/${clrTeam}/projects/${clrProj._id}`, {
+    token: bobToken,
+    body: { description: "" },
+  });
+  check("description cleared to empty string", cleared.json.project?.description, "");
+
+  // Omitted fields must still be left untouched.
+  const untouched = await api("PATCH", `/teams/${clrTeam}/projects/${clrProj._id}`, {
+    token: bobToken,
+    body: { description: "set again" },
+  });
+  check("description re-set successfully", untouched.status, 200);
+  const omitTitle = await api("PATCH", `/teams/${clrTeam}/projects/${clrProj._id}`, {
+    token: bobToken,
+    body: { description: "only description sent" },
+  });
+  check("omitted title is left unchanged", omitTitle.json.project?.title, "Has desc");
+  check("sent description is applied", omitTitle.json.project?.description, "only description sent");
+
+  // A title is required, so blanking it must be rejected, not silently ignored.
+  const blankTitle = await api("PATCH", `/teams/${clrTeam}/projects/${clrProj._id}`, {
+    token: bobToken,
+    body: { title: "" },
+  });
+  check("blanking a required title is rejected", blankTitle.status, 400);
+
+  await api("DELETE", `/teams/${clrTeam}`, { token: bobToken });
+
   // ----------------------------------------------------------------- teardown
   // There is no DELETE /auth/users endpoint, so we clean up straight through
   // Mongoose. Everything is scoped by the unique stamp in the test emails, so

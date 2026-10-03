@@ -48,8 +48,12 @@ const updateProject = async (req, res, next) => {
       return res.status(403).json({ error: "You can only edit your own projects" });
     }
 
-    if (title) project.title = title;
-    if (description) project.description = description;
+    // Compare against undefined rather than truthiness: an empty string is a valid
+    // value here and must CLEAR the field. `if (description)` would silently
+    // ignore "", leaving stale text the user thought they had removed. title is
+    // required by the schema, so a blank title fails validation below.
+    if (title !== undefined) project.title = title;
+    if (description !== undefined) project.description = description;
     await project.save();
 
     res.status(200).json({ message: "Project updated", project });

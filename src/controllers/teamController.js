@@ -10,13 +10,24 @@ const createTeam = async (req, res, next) => {
     const { name } = req.body;
     const userId = req.user.id;
 
-    const team = await Team.create({ name, ownerId: userId });
+    // Two writes that must both land. If the membership insert failed, the team
+    // would exist with NO owner — and a team with no owner is permanently stuck:
+    // removeMember refuses to remove an owner, while deleteTeam and
+    // transferOwnership both require one, so nobody could ever clean it up.
+    let team;
+    const session = await mongoose.startSession();
+    try {
+      await session.withTransaction(async () => {
+        team = await Team.create([{ name, ownerId: userId }], { session }).then((r) => r[0]);
 
-    await TeamMember.create({
-      userId,
-      teamId: team._id,
-      role: "owner",
-    });
+        await TeamMember.create(
+          [{ userId, teamId: team._id, role: "owner" }],
+          { session }
+        );
+      });
+    } finally {
+      await session.endSession();
+    }
 
     res.status(201).json({ message: "Team created", team });
   } catch (err) {
@@ -171,6 +182,13 @@ const removeMember = async (req, res, next) => {
 
     if (membership.role === "owner") {
       return res.status(400).json({ error: "Cannot remove the team owner" });
+    }
+
+    // An admin may only remove plain members. Letting one admin strip a peer's
+    // admin role means a single compromised admin can lock every other admin out
+    // of the team. Owners are unaffected and may remove anyone but themselves.
+    if (membership.role === "admin" && req.membership.role !== "owner") {
+      return res.status(403).json({ error: "Only an owner can remove another admin" });
     }
 
     await TeamMember.findByIdAndDelete(membership._id);
