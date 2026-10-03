@@ -258,6 +258,86 @@ const transferOwnership = async (req, res, next) => {
   }
 };
 
-module.exports = { createTeam, getTeam, getMyTeams, deleteTeam, addMember, listMembers, removeMember, transferOwnership };
+// UPDATE TEAM
+const updateTeam = async (req, res, next) => {
+  try {
+    const { teamId } = req.params;
+    const { name, description } = req.body || {};
+
+    const team = await Team.findById(teamId);
+    if (!team) return res.status(404).json({ error: "Team not found" });
+
+    // Compare against undefined rather than truthiness: an empty string is a
+    // valid value here and must CLEAR the field.
+    if (name !== undefined) team.name = name;
+    if (description !== undefined) team.description = description;
+    await team.save();
+
+    res.status(200).json({ message: "Team updated", team });
+  } catch (err) {
+    next(err);
+  }
+};
+
+// CHANGE MEMBER ROLE (owner only)
+const changeMemberRole = async (req, res, next) => {
+  try {
+    const { teamId, userId } = req.params;
+    const { role } = req.body || {};
+
+    const membership = await TeamMember.findOne({ teamId, userId });
+    if (!membership) {
+      return res.status(404).json({ error: "Membership not found" });
+    }
+
+    // Cannot change your own role — owner demoting themselves without a
+    // transfer would leave the team with no owner.
+    if (userId === req.user.id) {
+      return res.status(400).json({ error: "You cannot change your own role" });
+    }
+
+    // Cannot set role to "owner" — that is what transferOwnership is for.
+    if (role === "owner") {
+      return res.status(400).json({
+        error: "Ownership cannot be assigned directly — use transfer-ownership",
+      });
+    }
+
+    membership.role = role;
+    await membership.save();
+
+    res.status(200).json({ message: "Role updated", membership });
+  } catch (err) {
+    next(err);
+  }
+};
+
+// LEAVE TEAM
+const leaveTeam = async (req, res, next) => {
+  try {
+    const { teamId } = req.params;
+
+    const membership = await TeamMember.findOne({ teamId, userId: req.user.id });
+    if (!membership) {
+      return res.status(404).json({ error: "Membership not found" });
+    }
+
+    // Owner cannot leave without transferring ownership first — a team with
+    // no owner is permanently stuck (removeMember refuses to remove an owner,
+    // and deleteTeam/transferOwnership both require one).
+    if (membership.role === "owner") {
+      return res.status(400).json({
+        error: "Transfer ownership before leaving the team",
+      });
+    }
+
+    await TeamMember.findByIdAndDelete(membership._id);
+    res.status(200).json({ message: "Left team" });
+  } catch (err) {
+    next(err);
+  }
+};
+
+module.exports = { createTeam, getTeam, getMyTeams, deleteTeam, addMember, listMembers, removeMember, transferOwnership, updateTeam, changeMemberRole, leaveTeam };
 
 

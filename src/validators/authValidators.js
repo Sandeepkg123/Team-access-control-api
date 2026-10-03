@@ -52,4 +52,32 @@ const loginValidator = [
     .withMessage("Password is required"),
 ];
 
-module.exports = { signupValidator, loginValidator, MAX_PASSWORD_BYTES };
+const forgotPasswordValidator = [
+  body("email").isEmail().withMessage("Valid email required").normalizeEmail(),
+];
+
+const resetPasswordValidator = [
+  body("token")
+    .isString()
+    .withMessage("Reset token is required")
+    .bail()
+    .notEmpty()
+    .withMessage("Reset token is required"),
+  body("newPassword")
+    .isString()
+    .withMessage("Password must be a string")
+    .bail()
+    .isLength({ min: 6 })
+    .withMessage("Password must be at least 6 characters")
+    .custom((value) => {
+      const bytes = Buffer.byteLength(String(value), "utf8");
+      if (bytes > MAX_PASSWORD_BYTES) {
+        throw new Error(
+          `Password must be at most ${MAX_PASSWORD_BYTES} bytes (you sent ${bytes})`
+        );
+      }
+      return true;
+    }),
+];
+
+module.exports = { signupValidator, loginValidator, forgotPasswordValidator, resetPasswordValidator, MAX_PASSWORD_BYTES };

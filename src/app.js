@@ -3,6 +3,7 @@ const cors = require("cors");
 const cookieParser = require("cookie-parser");
 const authRoutes = require("./routes/authRoutes");
 const teamRoutes = require("./routes/teamRoutes");
+const userRoutes = require("./routes/userRoutes");
 const errorHandler = require("./middleware/errorHandler");
 
 const app = express();
@@ -40,6 +41,7 @@ app.get("/health", (req, res) => {
 
 app.use("/auth", authRoutes);
 app.use("/teams", teamRoutes);
+app.use("/users", userRoutes);
 app.use(errorHandler);
 
 

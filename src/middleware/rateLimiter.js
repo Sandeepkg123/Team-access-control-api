@@ -36,4 +36,13 @@ const refreshLimiter = rateLimit({
   ...common,
 });
 
-module.exports = { loginLimiter, signupLimiter, refreshLimiter };
+// Forgot-password is an email-triggering endpoint. Without a limit, an attacker
+// can use it to flood arbitrary addresses with reset emails (spam vector).
+const forgotPasswordLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000, // 1 hour
+  max: 3, // 3 requests per window per IP
+  message: { error: "Too many password reset attempts, please try again later" },
+  ...common,
+});
+
+module.exports = { loginLimiter, signupLimiter, refreshLimiter, forgotPasswordLimiter };

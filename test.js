@@ -728,6 +728,150 @@ const bobId = bob.userId ?? promoteBob.json.membership?.userId;
 
   await api("DELETE", `/teams/${clrTeam}`, { token: bobToken });
 
+  // ============================================ STEP 12: update team
+  group("FEATURE: update team (PATCH /teams/:teamId)");
+
+  const updateTeamRes = await api("PATCH", `/teams/${teamA}`, {
+    token: tokenA,
+    body: { name: "Team A Renamed", description: "Updated description" },
+  });
+  check("owner can update team 200", updateTeamRes.status, 200);
+  check("team name updated", updateTeamRes.json.team?.name, "Team A Renamed");
+  check("team description updated", updateTeamRes.json.team?.description, "Updated description");
+
+  // Member cannot update team
+  const memberUpdateTeam = await api("PATCH", `/teams/${teamA}`, {
+    token: await login(erin.email, erin.password),
+    body: { name: "Hacked" },
+  });
+  check("member cannot update team (403)", memberUpdateTeam.status, 403);
+
+  // ============================================ STEP 13: change member role
+  group("FEATURE: change member role (PATCH /teams/:teamId/members/:userId/role)");
+
+  // Get erin's userId
+  const membersForRole = await api("GET", `/teams/${teamA}/members`, { token: tokenA });
+  const erinMembership = membersForRole.json.members?.find((m) => m.userId?.email === erin.email);
+  const erinUserId = erinMembership?.userId?._id;
+  check("erin's userId captured", typeof erinUserId, "string");
+
+  // Owner promotes erin to admin (bob is owner after transfer)
+  const promoteErin = await api("PATCH", `/teams/${teamA}/members/${erinUserId}/role`, {
+    token: bobToken,
+    body: { role: "admin" },
+  });
+  check("owner can promote member to admin 200", promoteErin.status, 200);
+  check("erin is now admin", promoteErin.json.membership?.role, "admin");
+
+  // Admin (erin) cannot change roles
+  const erinToken = await login(erin.email, erin.password);
+  const adminChangeRole = await api("PATCH", `/teams/${teamA}/members/${bobId}/role`, {
+    token: erinToken,
+    body: { role: "member" },
+  });
+  check("admin cannot change roles (403)", adminChangeRole.status, 403);
+
+  // Owner cannot change own role
+  const selfChangeRole = await api("PATCH", `/teams/${teamA}/members/${bobId}/role`, {
+    token: bobToken,
+    body: { role: "member" },
+  });
+  check("cannot change own role (400)", selfChangeRole.status, 400);
+
+  // Cannot set role to owner (bob is owner after transfer)
+  const setOwnerRole = await api("PATCH", `/teams/${teamA}/members/${erinUserId}/role`, {
+    token: bobToken,
+    body: { role: "owner" },
+  });
+  check("cannot set role to owner (400)", setOwnerRole.status, 400);
+
+  // ============================================ STEP 14: leave team
+  group("FEATURE: leave team (POST /teams/:teamId/leave)");
+
+  // Erin (admin) can leave
+  const erinLeave = await api("POST", `/teams/${teamA}/leave`, { token: erinToken });
+  check("admin can leave team 200", erinLeave.status, 200);
+
+  // Verify erin is no longer a member
+  const erinAfterLeave = await api("GET", `/teams/${teamA}`, { token: erinToken });
+  check("erin no longer has access after leaving (403)", erinAfterLeave.status, 403);
+
+  // Owner cannot leave without transferring (bob is owner after transfer)
+  const ownerLeave = await api("POST", `/teams/${teamA}/leave`, { token: bobToken });
+  check("owner cannot leave without transferring (400)", ownerLeave.status, 400);
+
+  // ============================================ STEP 15: user profile
+  group("FEATURE: user profile (GET/PATCH /users/me)");
+
+  const getProfile = await api("GET", "/users/me", { token: tokenA });
+  check("get profile 200", getProfile.status, 200);
+  check("profile has name", getProfile.json.user?.name, "Alice");
+  check("profile has email", getProfile.json.user?.email, alice.email);
+  check("profile has no password", getProfile.json.user?.password, undefined);
+
+  const updateName = await api("PATCH", "/users/me", {
+    token: tokenA,
+    body: { name: "Alice Updated" },
+  });
+  check("update name 200", updateName.status, 200);
+  check("name updated", updateName.json.user?.name, "Alice Updated");
+
+  // Change password
+  const changePw = await api("PATCH", "/users/me", {
+    token: tokenA,
+    body: { currentPassword: "Secret123!", password: "NewSecret456!" },
+  });
+  check("change password 200", changePw.status, 200);
+
+  // Login with new password
+  const loginNewPw = await api("POST", "/auth/login", {
+    body: { email: alice.email, password: "NewSecret456!" },
+  });
+  check("login with new password 200", loginNewPw.status, 200);
+
+  // Wrong current password
+  const wrongPw = await api("PATCH", "/users/me", {
+    token: tokenA,
+    body: { currentPassword: "WrongPassword", password: "Another1!" },
+  });
+  check("wrong current password rejected (401)", wrongPw.status, 401);
+
+  // ============================================ STEP 16: password reset
+  group("FEATURE: password reset (forgot/reset)");
+
+  // Request reset
+  const forgotRes = await api("POST", "/auth/forgot-password", {
+    body: { email: alice.email },
+  });
+  check("forgot password 200", forgotRes.status, 200);
+  const resetToken = forgotRes.json.devToken;
+  check("reset token returned in dev", typeof resetToken, "string");
+
+  // Reset password
+  const resetRes = await api("POST", "/auth/reset-password", {
+    body: { token: resetToken, newPassword: "ResetPass789!" },
+  });
+  check("reset password 200", resetRes.status, 200);
+
+  // Login with reset password
+  const loginReset = await api("POST", "/auth/login", {
+    body: { email: alice.email, password: "ResetPass789!" },
+  });
+  check("login with reset password 200", loginReset.status, 200);
+
+  // Token cannot be reused
+  const reuseReset = await api("POST", "/auth/reset-password", {
+    body: { token: resetToken, newPassword: "AnotherPass1!" },
+  });
+  check("reset token cannot be reused (400)", reuseReset.status, 400);
+
+  // Non-existent email returns same message (no enumeration)
+  const forgotNonExistent = await api("POST", "/auth/forgot-password", {
+    body: { email: `nonexistent${stamp}${rand}@test.com` },
+  });
+  check("forgot password for non-existent email 200", forgotNonExistent.status, 200);
+  check("same message for non-existent email", forgotNonExistent.json.message, "If that email is registered, a reset link has been sent");
+
   // ----------------------------------------------------------------- teardown
   // There is no DELETE /auth/users endpoint, so we clean up straight through
   // Mongoose. Everything is scoped by the unique stamp in the test emails, so

@@ -26,4 +26,26 @@ const transferOwnershipValidator = [
     .withMessage("newOwnerUserId must be a valid user id"),
 ];
 
-module.exports = { addMemberValidator, transferOwnershipValidator };
+const updateTeamValidator = [
+  body("name")
+    .optional()
+    .isString()
+    .withMessage("Name must be a string")
+    .bail()
+    .trim()
+    .notEmpty()
+    .withMessage("Name cannot be empty"),
+  body("description")
+    .optional()
+    .isString()
+    .withMessage("Description must be a string"),
+];
+
+// Only owner can change roles. Role can only be "admin" or "member" — never "owner".
+const changeRoleValidator = [
+  body("role")
+    .isIn(["admin", "member"])
+    .withMessage("Role must be one of: admin, member"),
+];
+
+module.exports = { addMemberValidator, transferOwnershipValidator, updateTeamValidator, changeRoleValidator };
