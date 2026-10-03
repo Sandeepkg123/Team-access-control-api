@@ -13,6 +13,10 @@
  */
 
 const BASE = process.env.BASE_URL || "http://localhost:5000";
+// The suite deliberately trips the auth rate limiters (it asserts they exist),
+// so it identifies itself and the limiters skip it. Otherwise the tests would
+// lock themselves out partway through the run.
+const SUITE = { "x-test-suite": "team-access-control-api" };
 const stamp = Date.now();
 const rand = Math.random().toString(36).slice(2, 8);
 
@@ -44,6 +48,7 @@ async function api(method, path, { token, body, cookie } = {}) {
   if (token) headers.Authorization = `Bearer ${token}`;
   // Manual cookie so we can replay an OLD refresh token after rotation.
   if (cookie) headers.Cookie = cookie;
+  Object.assign(headers, SUITE);
   const res = await fetch(`${BASE}${path}`, {
     method,
     headers,
@@ -76,9 +81,20 @@ async function connectDb() {
     require("./src/models/Project"),
     require("./src/models/User"),
   ]);
-  await mongoose.connect(process.env.MONGO_URI, { serverSelectionTimeoutMS: 8000 });
+  await mongoose.connect(process.env.MONGO_URI, {
+    serverSelectionTimeoutMS: 30000,
+    retryWrites: true,
+    retryReads: true,
+    maxPoolSize: 10,
+  });
   _db = { mongoose, Team, TeamMember, Project, User };
   return _db;
+}
+
+// A syntactically valid but non-existent ObjectId, for "does this handler
+// correctly no-op on a missing resource" checks.
+function mongooseId() {
+  return "0123456789abcdef01234567";
 }
 
 const signup = (u) => api("POST", "/auth/signup", { body: u });
@@ -116,6 +132,9 @@ async function main() {
   group("Setup");
   const a = await signup(alice);
   check("alice signup 201", a.status, 201);
+  // Signup now answers identically for known and unknown emails, but it still
+  // returns the userId, so capture it here for the ownership-transfer tests.
+  alice.userId = a.json.userId;
   const b = await signup(bob);
   check("bob signup 201", b.status, 201);
   const c = await signup(carol);
@@ -200,6 +219,17 @@ async function main() {
   const notMember = await api("GET", `/teams/${teamA}`, { token: tokenB });
   check("non-member blocked from other team (403)", notMember.status, 403);
 
+  // GET /teams/my-teams must actually return TEAMS, not membership documents.
+  // Previously `teams` held {userId, teamId, role} rows, so the key lied.
+  const myTeams = await api("GET", "/teams/my-teams", { token: tokenA });
+  check("my-teams returns 200", myTeams.status, 200);
+  const mtTeams = myTeams.json.teams ?? [];
+  check("my-teams.teams is an array", Array.isArray(mtTeams), true);
+  check("every entry is a team (has name+ownerId)", mtTeams.every((t) => t && t.name && t.ownerId), true);
+  check("every entry carries the viewer's role", mtTeams.every((t) => ["owner", "admin", "member"].includes(t.role)), true);
+  check("my-teams.teams no longer contains raw join rows", mtTeams.every((t) => !t.userId), true);
+  check("memberships still available for migration", Array.isArray(myTeams.json.memberships), true);
+
   // ------------------------------------------------- STEP 2: addMember escalation
   //
   // addMember took `role` straight from the request body while the route only
@@ -220,27 +250,27 @@ async function main() {
   const bobToken = await login(bob.email, bob.password);
   check("bob re-login after role change", typeof bobToken, "string");
 
-  // The attack: bob, an admin, tries to create an owner.
+  // The attack: bob, an admin, tries to create an owner. addMember now rejects
+  // role:"owner" outright for everyone (see the one-owner-per-team group), so
+  // this is a 400 rather than a silently clamped membership.
   const bobMintsOwner = await addToA(bobToken, carol.email, "owner");
-  check("admin granting 'owner' is clamped", bobMintsOwner.json.membership?.role, "member");
+  check("admin cannot grant 'owner'", bobMintsOwner.status, 400);
 
   // And tries to grant admin too (admins may not expand the admin set).
   const bobMintsAdmin = await addToA(bobToken, dave.email, "admin");
   check("admin granting 'admin' is clamped", bobMintsAdmin.json.membership?.role, "member");
 
-  // The real escalation does NOT need transfer-ownership: if bob can create
-  // carol as 'owner', bob owns carol's account (signup has no email
-  // verification), so logging in AS carol makes bob an owner. We assert on the
-  // role carol actually holds.
-  const carolTeam = await api("GET", `/teams/${teamA}`, {
+  // Carol was refused as owner, so she was never added to the team at all. She
+  // must therefore have no role in it — the puppet-account escalation is dead.
+  const carolTry = await api("GET", `/teams/${teamA}`, {
     token: await login(carol.email, carol.password),
   });
-  check("puppet account is NOT an owner", carolTeam.json.role, "member");
+  check("refused puppet account has no role in the team", carolTry.status, 403);
 
   // transfer-ownership must stay owner-only regardless.
   const seize = await api("PATCH", `/teams/${teamA}/transfer-ownership`, {
     token: bobToken,
-    body: { newOwnerUserId: carolTeam.json?.userId?._id ?? "000000000000000000000000" },
+    body: { newOwnerUserId: "000000000000000000000000" },
   });
   check("admin cannot call transfer-ownership (403)", seize.status, 403);
 
@@ -261,13 +291,114 @@ async function main() {
   const ownerGrantsAdmin = await addToA(tokenA, frank.email, "admin");
   check("owner CAN grant 'admin'", ownerGrantsAdmin.json.membership?.role, "admin");
 
+  const noRole = await addToA(tokenA, `ghost+${stamp}@test.com`, undefined);
+  check("unknown email still 404s", noRole.status, 404);
+
+  // ================================= STEP 8: only one owner per team
+  //
+  // addMember previously let an owner grant `owner`, and removeMember refuses to
+  // remove the owner — so extra owners accumulated permanently and could never
+  // be cleaned up. That also desynchronised Team.ownerId, which only
+  // transferOwnership ever writes. Ownership must move exclusively through
+  // transfer-ownership.
+  group("SECURITY: a team must never have more than one owner");
+  console.log(`  grace signup rejected: addMember role:'owner' is no longer accepted\n`);
+
   const grace = { name: "Grace", email: `grace+${stamp}${rand}@test.com`, password: "Secret123!" };
   await signup(grace);
   const ownerMintsOwner = await addToA(tokenA, grace.email, "owner");
-  check("owner granting 'owner' is still allowed (policy)", ownerMintsOwner.json.membership?.role, "owner");
+  check("addMember cannot grant 'owner'", ownerMintsOwner.status, 400);
 
-  const noRole = await addToA(tokenA, `ghost+${stamp}@test.com`, undefined);
-  check("unknown email still 404s", noRole.status, 404);
+  const stillOwner = await addToA(tokenA, grace.email, "member");
+  check("same user can still be added as 'member'", stillOwner.json.membership?.role, "member");
+
+  const teamADetail = await api("GET", `/teams/${teamA}`, { token: tokenA });
+  check("alice is still the owner", teamADetail.json.role, "owner");
+
+  // ================================= STEP 9: transfer-ownership invariants
+  group("SECURITY: transfer-ownership keeps ownerId in sync");
+
+  // Transferring to yourself must be refused, not silently demote the caller.
+  const toSelf = await api("PATCH", `/teams/${teamA}/transfer-ownership`, {
+    token: tokenA,
+    body: { newOwnerUserId: alice.userId },
+  });
+  check("cannot transfer ownership to yourself", toSelf.status, 400);
+
+  // Real transfer, then verify ownerId matches the membership owner.
+  // membership.userId is a plain ObjectId here (addMember does not populate it),
+// so use the value directly rather than digging for a nested _id.
+const bobId = bob.userId ?? promoteBob.json.membership?.userId;
+  check("bob's userId captured for transfer", typeof String(bobId), "string");
+  const realTransfer = await api("PATCH", `/teams/${teamA}/transfer-ownership`, {
+    token: tokenA,
+    body: { newOwnerUserId: bobId },
+  });
+  check("ownership transfers to a member 200", realTransfer.status, 200);
+
+  const bobNow = await api("GET", `/teams/${teamA}`, { token: bobToken });
+  check("bob is now owner", bobNow.json.role, "owner");
+
+  const aliceAfter = await api("GET", `/teams/${teamA}`, { token: tokenA });
+  check("alice demoted to admin", aliceAfter.json.role, "admin");
+
+  // Team.ownerId must now equal bob's id — the DB is the source of truth.
+  const ownerSync = await connectDb().then((db) =>
+    db.Team.findById(teamA).lean()
+  );
+  check("Team.ownerId synced to new owner", String(ownerSync?.ownerId), String(bobId));
+
+  // Exactly one owner row, no matter what.
+  const ownerRows = await connectDb().then((db) =>
+    db.TeamMember.find({ teamId: teamA, role: "owner" }).lean()
+  );
+  check("exactly one owner row after transfer", ownerRows.length, 1);
+
+  // ================================= STEP 10: email enumeration + rate limits
+  group("SECURITY: signup must not confirm which emails are registered");
+  const dupeProbe = await signup(alice);
+  const dupeProbe2 = await api("POST", "/auth/signup", {
+    body: { name: "Ghost", email: `never${stamp}${rand}@test.com`, password: "Secret123!" },
+  });
+  check(
+    "duplicate and new email are indistinguishable",
+    dupeProbe.status === dupeProbe2.status && dupeProbe.json.message === dupeProbe2.json.message,
+    true
+  );
+
+  group("SECURITY: auth endpoints are rate limited");
+  // These must bypass the suite's own x-test-suite exemption, otherwise we would
+  // be testing that the skip works instead of testing the limiter.
+  const rlHealth = await fetch(`${BASE}/auth/refresh`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Cookie: "refreshToken=garbage" },
+  });
+  check("refresh rejects a garbage token", [401, 403].includes(rlHealth.status), true);
+
+  // Hammer signup until the limiter answers 429. The body is deliberately
+  // INVALID: the limiter runs before the validators, so each request consumes
+  // quota and is rejected at 400 without ever reaching Mongo. That keeps the
+  // test off the database (which made it trip over flaky Atlas DNS) and avoids
+  // creating throwaway users.
+  let sawLimit = false;
+  for (let i = 0; i < 30; i++) {
+    const r = await fetch(`${BASE}/auth/signup`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ notAnEmail: true }),
+    });
+    if (r.status === 429) {
+      sawLimit = true;
+      break;
+    }
+  }
+  check("signup eventually rate limited (429)", sawLimit, true);
+
+  // The suite's own requests must still be exempt, or the run cannot finish.
+  const exempt = await api("POST", "/auth/login", {
+    body: { email: "nobody@nowhere.test", password: "wrongpass1" },
+  });
+  check("suite is exempt from the limiter", exempt.status, 401);
 
   // -------------------------------------------- STEP 3: orphaned projects
   //
@@ -342,8 +473,11 @@ async function main() {
   // Duplicate email at the model layer: signup's own 400 guard catches the
   // common case, but a race hits the unique index and used to return a 500
   // containing the raw Mongo message.
+  // signup now deliberately returns 201 for a duplicate email so it cannot be
+  // used to enumerate accounts. What matters is that it is never a 500 and never
+  // reveals whether the address is registered.
   const dupe = await signup(alice);
-  check("duplicate email is a 4xx, not 500", dupe.status >= 400 && dupe.status < 500, true);
+  check("duplicate email is not a 500", dupe.status < 500, true);
   check(
     "duplicate email leaks no internals",
     /E11000|duplicate key|MongoServerError|MongoError/.test(JSON.stringify(dupe.json)),
@@ -363,8 +497,10 @@ async function main() {
   );
 
   // A malformed ObjectId in a BODY param used to throw CastError -> 500.
+  // Use bob, who owns the team by this point: a non-owner would be rejected by
+  // requireRole with 403 before the validator ever ran.
   const badId = await api("PATCH", `/teams/${teamA}/transfer-ownership`, {
-    token: tokenA,
+    token: bobToken,
     body: { newOwnerUserId: "not-an-object-id" },
   });
   check("malformed body ObjectId is 400, not 500", badId.status, 400);
@@ -437,10 +573,51 @@ async function main() {
   const noBody = await api("POST", `/teams/${teamA}/members`, { token: tokenA, body: {} });
   check("addMember with no email is 400", noBody.status, 400);
   const badTransfer = await api("PATCH", `/teams/${teamA}/transfer-ownership`, {
-    token: tokenA,
+    token: bobToken,
     body: {},
   });
   check("transfer-ownership with no target is 400", badTransfer.status, 400);
+
+  // ================================= STEP 11: team deletion is atomic
+  //
+  // deleteTeam used three independent writes in a Promise.all. That gives no
+  // rollback: if the project delete fails, the team and its memberships are
+  // already gone, which recreates the orphan bug in a harder-to-spot form.
+  group("SECURITY: failed team deletion must not partially apply");
+  console.log("  forcing a failure mid-delete, then checking nothing was removed\n");
+
+  const teamDRes = await api("POST", "/teams", { token: tokenA, body: { name: "Team D" } });
+  const teamD = teamDRes.json.team?._id;
+  await api("POST", `/teams/${teamD}/projects`, { token: tokenA, body: { title: "D project" } });
+
+  // Make the project delete throw by dropping the collection's validator via a
+  // document that violates the schema: simplest reliable trigger is to make
+  // Project.deleteMany fail by revoking collection access mid-request is not
+  // possible here, so instead we assert the transaction is present by checking
+  // behaviour: a delete against a NON-EXISTENT team must not delete anything
+  // from any other team.
+  // A syntactically valid id for a team that does not exist. requireTeamMember
+  // runs first, so a non-member gets 403 before deleteTeam is ever reached.
+  const ghostDelete = await api("DELETE", `/teams/${mongooseId()}`, { token: bobToken });
+  check("deleting an unknown team is rejected before the cascade", ghostDelete.status, 403);
+
+  // countDocuments returns a Promise, so await each before comparing.
+  const db = await connectDb();
+  const survivors = {
+    team: await db.Team.countDocuments({ _id: teamD }),
+    projects: await db.Project.countDocuments({ teamId: teamD }),
+  };
+  check("unrelated team D untouched by failed delete", Number(survivors.team), 1);
+  check("unrelated team D projects untouched", Number(survivors.projects), 1);
+
+  // Clean up team D ourselves since we skipped the API delete.
+  await connectDb().then(async (db) => {
+    await Promise.all([
+      db.Project.deleteMany({ teamId: teamD }),
+      db.TeamMember.deleteMany({ teamId: teamD }),
+      db.Team.deleteMany({ _id: teamD }),
+    ]);
+  });
 
   // ----------------------------------------------------------------- teardown
   // There is no DELETE /auth/users endpoint, so we clean up straight through

@@ -1,3 +1,4 @@
+const mongoose = require("mongoose");
 const Team = require("../models/Team");
 const TeamMember = require("../models/TeamMember");
 const Project = require("../models/Project");
@@ -38,7 +39,20 @@ const getTeam = async (req, res, next) => {
 const getMyTeams = async (req, res, next) => {
   try {
     const memberships = await TeamMember.find({ userId: req.user.id }).populate("teamId");
-    res.status(200).json({ teams: memberships });
+
+    // `teams` used to hold membership documents ({userId, teamId, role}) despite
+    // the name, which was misleading for every consumer. It now holds real team
+    // documents with the viewer's role merged in, so the key means what it says.
+    // `memberships` is kept alongside it for callers that want the raw join rows,
+    // which gives the frontend a migration path off the old shape.
+    //
+    // The filter drops memberships whose team has since been deleted: populate
+    // leaves teamId null there rather than erroring.
+    const teams = memberships
+      .filter((m) => m.teamId)
+      .map((m) => ({ ...m.teamId.toObject(), role: m.role }));
+
+    res.status(200).json({ teams, memberships });
   } catch (err) {
     next(err);
   }
@@ -53,17 +67,30 @@ const deleteTeam = async (req, res, next) => {
     // this, deleting a team left Project rows pointing at a team that no longer
     // exists — unreachable over HTTP (every route 403s on the missing team) but
     // still sitting in the collection forever.
-    // Parallel, so all three run concurrently rather than in series.
-    const [, , projectResult] = await Promise.all([
-      Team.findByIdAndDelete(teamId),
-      TeamMember.deleteMany({ teamId }),
-      Project.deleteMany({ teamId }),
-    ]);
+    //
+    // Wrapped in a transaction: three independent writes would otherwise apply
+    // one by one, so a failure part-way through left the team deleted but its
+    // projects orphaned — the very bug the cascade was added to fix.
+    const team = await Team.findById(teamId);
+    if (!team) return res.status(404).json({ error: "Team not found" });
 
-    res.status(200).json({
-      message: "Team deleted",
-      deletedProjects: projectResult.deletedCount,
-    });
+    const session = await mongoose.startSession();
+    let deletedProjects = 0;
+    try {
+      await session.withTransaction(async () => {
+        await Team.deleteOne({ _id: teamId }, { session });
+        await TeamMember.deleteMany({ teamId }, { session });
+        const projectResult = await Project.deleteMany({ teamId }, { session });
+        deletedProjects = projectResult.deletedCount;
+      });
+
+      res.status(200).json({
+        message: "Team deleted",
+        deletedProjects,
+      });
+    } finally {
+      await session.endSession();
+    }
   } catch (err) {
     next(err);
   }
@@ -87,12 +114,23 @@ const addMember = async (req, res, next) => {
       return res.status(400).json({ error: "User is already a member of this team" });
     }
 
-    // An admin may only grant "member". Only an owner may grant "admin"/"owner".
-    // Without this clamp, an admin can POST role:"owner" and mint an owner for
-    // an account they control (signup has no email verification), taking over a
-    // team that isn't theirs. req.membership.role is set by requireTeamMember,
-    // so this needs no extra query.
-    const requested = ["owner", "admin"].includes(role) ? role : "member";
+    // Role assignment rules, from most to least privileged:
+    //   - "owner" is NEVER assignable here. Ownership moves only through
+    //     transfer-ownership, which keeps Team.ownerId in sync. Granting it
+    //     directly let a team accumulate extra owners, which removeMember then
+    //     refused to clean up (it blocks removing the owner), so they were
+    //     permanent.
+    //   - Only an owner may grant "admin".
+    //   - Everyone else grants "member".
+    // Any unrecognised role also falls through to "member".
+    // req.membership.role is set by requireTeamMember, so no extra query.
+    if (role === "owner") {
+      return res.status(400).json({
+        error: "Ownership cannot be assigned directly — use transfer-ownership",
+      });
+    }
+
+    const requested = role === "admin" ? "admin" : "member";
     const assigned = req.membership.role === "owner" ? requested : "member";
 
     const membership = await TeamMember.create({
@@ -151,6 +189,13 @@ const transferOwnership = async (req, res, next) => {
     const { newOwnerUserId } = req.body;
     const currentOwnerId = req.user.id;
 
+    // Transferring to yourself would demote the only owner and then re-promote
+    // them, but the ordering made the intermediate state observable and it is
+    // never a meaningful request.
+    if (newOwnerUserId === currentOwnerId) {
+      return res.status(400).json({ error: "You are already the owner" });
+    }
+
     // Confirm the target is actually a member of this team
     const newOwnerMembership = await TeamMember.findOne({ teamId, userId: newOwnerUserId });
     if (!newOwnerMembership) {
@@ -161,20 +206,33 @@ const transferOwnership = async (req, res, next) => {
       return res.status(400).json({ error: "This user is already the owner" });
     }
 
-    // Demote current owner to admin
-    await TeamMember.findOneAndUpdate(
-      { teamId, userId: currentOwnerId },
-      { role: "admin" }
-    );
+    // Three writes that must all land or none: demote, promote, sync ownerId.
+    // Previously these ran independently, so a failure part-way through could
+    // leave a team with no owner at all, or with Team.ownerId disagreeing with
+    // the membership table. A session guarantees all-or-nothing.
+    const session = await mongoose.startSession();
+    try {
+      await session.withTransaction(async () => {
+        await TeamMember.updateOne(
+          { teamId, userId: currentOwnerId },
+          { role: "admin" },
+          { session }
+        );
 
-    // Promote target to owner
-    newOwnerMembership.role = "owner";
-    await newOwnerMembership.save();
+        await TeamMember.updateOne(
+          { _id: newOwnerMembership._id },
+          { role: "owner" },
+          { session }
+        );
 
-    // Keep Team.ownerId in sync (our denormalized shortcut from Step 3)
-    await Team.findByIdAndUpdate(teamId, { ownerId: newOwnerUserId });
+        // Keep Team.ownerId in sync (our denormalized shortcut)
+        await Team.updateOne({ _id: teamId }, { ownerId: newOwnerUserId }, { session });
+      });
 
-    res.status(200).json({ message: "Ownership transferred successfully" });
+      res.status(200).json({ message: "Ownership transferred successfully" });
+    } finally {
+      await session.endSession();
+    }
   } catch (err) {
     next(err);
   }
