@@ -7,4 +7,8 @@ const projectSchema = new mongoose.Schema({
   createdBy: { type: mongoose.Schema.Types.ObjectId, ref: "User", required: true },
 }, { timestamps: true });
 
+// Index on teamId: every query filters by teamId (find, findOne). Without an
+// index, MongoDB does a full collection scan on every project request.
+projectSchema.index({ teamId: 1 });
+
 module.exports = mongoose.model("Project", projectSchema);

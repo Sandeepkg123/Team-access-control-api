@@ -5,12 +5,13 @@ const authenticate = require("../middleware/authenticate");
 const requireTeamMember = require("../middleware/requireTeamMember");
 const requireRole = require("../middleware/requireRole");
 const validateObjectId = require("../middleware/validateObjectId");
+const { writeLimiter } = require("../middleware/rateLimiter");
 
 router.use(authenticate);
 
-router.post("/", requireTeamMember, createProject);
+router.post("/", requireTeamMember, writeLimiter, createProject);
 router.get("/", requireTeamMember, listProjects);
-router.patch("/:projectId", validateObjectId("projectId"), requireTeamMember, updateProject);
-router.delete("/:projectId", validateObjectId("projectId"), requireTeamMember, requireRole(["owner", "admin"]), deleteProject);
+router.patch("/:projectId", validateObjectId("projectId"), requireTeamMember, writeLimiter, updateProject);
+router.delete("/:projectId", validateObjectId("projectId"), requireTeamMember, requireRole(["owner", "admin"]), writeLimiter, deleteProject);
 
 module.exports = router;

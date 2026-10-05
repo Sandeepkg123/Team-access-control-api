@@ -45,4 +45,13 @@ const forgotPasswordLimiter = rateLimit({
   ...common,
 });
 
-module.exports = { loginLimiter, signupLimiter, refreshLimiter, forgotPasswordLimiter };
+// Write operations on teams and projects. Without a limit, an authenticated
+// user can spam creates and edits without bound.
+const writeLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: 30, // 30 write requests per window
+  message: { error: "Too many requests, please slow down" },
+  ...common,
+});
+
+module.exports = { loginLimiter, signupLimiter, refreshLimiter, forgotPasswordLimiter, writeLimiter };

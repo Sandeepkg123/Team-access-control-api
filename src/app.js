@@ -1,5 +1,6 @@
 const express = require("express");
 const cors = require("cors");
+const helmet = require("helmet");
 const cookieParser = require("cookie-parser");
 const authRoutes = require("./routes/authRoutes");
 const teamRoutes = require("./routes/teamRoutes");
@@ -21,6 +22,7 @@ if (process.env.TRUST_PROXY) {
   console.log(`trust proxy enabled (${hops})`);
 }
 
+app.use(helmet());
 app.use(express.json());        // parses JSON body of incoming requests
 app.use(cookieParser());        // parses cookies (for refresh token later)
 app.use(cors({
