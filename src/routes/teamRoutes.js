@@ -1,6 +1,6 @@
 const express = require("express");
 const router = express.Router();
-const { createTeam, getTeam, getMyTeams, deleteTeam, addMember, listMembers, removeMember, transferOwnership, updateTeam, changeMemberRole, leaveTeam } = require("../controllers/teamController");
+const { createTeam, getTeam, getMyTeams, deleteTeam, addMember, listMembers, removeMember, transferOwnership, updateTeam, changeMemberRole, leaveTeam, getAuditLog } = require("../controllers/teamController");
 const authenticate = require("../middleware/authenticate");
 const requireTeamMember = require("../middleware/requireTeamMember");
 const requireRole = require("../middleware/requireRole");
@@ -28,6 +28,7 @@ router.delete("/:teamId/members/:userId", validateObjectId("teamId"), validateOb
 router.patch("/:teamId/members/:userId/role", validateObjectId("teamId"), validateObjectId("userId"), requireTeamMember, requireRole(["owner"]), changeRoleValidator, validate, writeLimiter, changeMemberRole);
 router.patch("/:teamId/transfer-ownership", validateObjectId("teamId"), requireTeamMember, requireRole(["owner"]), transferOwnershipValidator, validate, writeLimiter, transferOwnership);
 router.post("/:teamId/leave", validateObjectId("teamId"), requireTeamMember, writeLimiter, leaveTeam);
+router.get("/:teamId/audit-log", validateObjectId("teamId"), requireTeamMember, requireRole(["owner", "admin"]), getAuditLog);
 
 // teamId must be validated here, not left to the nested router: projectRoutes
 // only ever sees its own :projectId, so a malformed teamId (e.g. /teams/nope/

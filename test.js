@@ -937,6 +937,39 @@ const bobId = bob.userId ?? promoteBob.json.membership?.userId;
   // Clean up pagination team
   await api("DELETE", `/teams/${pageTeamId}`, { token: tokenA });
 
+  // ============================================ STEP 19: audit log
+  group("FEATURE: audit log records membership changes");
+
+  // Team A already had members added/removed/role changed/ownership transferred.
+  // The audit log should contain entries for those actions.
+  const auditRes = await api("GET", `/teams/${teamA}/audit-log`, { token: bobToken });
+  check("audit log returns 200", auditRes.status, 200);
+  check("audit log has entries", auditRes.json.logs?.length > 0, true);
+  check("audit entries have actorId", auditRes.json.logs?.every((l) => l.actorId), true);
+  check("audit entries have action", auditRes.json.logs?.every((l) => l.action), true);
+  check("audit entries have teamId", auditRes.json.logs?.every((l) => l.teamId), true);
+
+  // Check for specific actions we know happened
+  const actions = auditRes.json.logs?.map((l) => l.action) || [];
+  check("member_added entries exist", actions.includes("member_added"), true);
+  check("role_changed entries exist", actions.includes("role_changed"), true);
+  check("member_removed entries exist", actions.includes("member_removed"), true);
+  check("ownership_transferred entries exist", actions.includes("ownership_transferred"), true);
+  check("member_left entries exist", actions.includes("member_left"), true);
+
+  // Pagination on audit log
+  const auditPage2 = await api("GET", `/teams/${teamA}/audit-log?page=2&limit=2`, { token: bobToken });
+  check("audit log pagination works", auditPage2.status, 200);
+
+  // Non-admin/owner cannot access audit log
+  const memberAudit = await api("GET", `/teams/${teamA}/audit-log`, { token: tokenA });
+  check("member (alice/admin now) can access audit log", memberAudit.status, 200);
+  // Alice is an admin now, so she can access. A plain member cannot.
+  // Grace is a member — check her access (need her token)
+  const graceToken = await login(grace.email, grace.password);
+  const graceAudit = await api("GET", `/teams/${teamA}/audit-log`, { token: graceToken });
+  check("plain member cannot access audit log (403)", graceAudit.status, 403);
+
   // ----------------------------------------------------------------- teardown
   // There is no DELETE /auth/users endpoint, so we clean up straight through
   // Mongoose. Everything is scoped by the unique stamp in the test emails, so

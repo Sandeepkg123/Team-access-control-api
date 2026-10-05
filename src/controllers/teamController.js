@@ -3,6 +3,7 @@ const Team = require("../models/Team");
 const TeamMember = require("../models/TeamMember");
 const Project = require("../models/Project");
 const User = require("../models/User");
+const AuditLog = require("../models/AuditLog");
 
 // CREATE TEAM
 const createTeam = async (req, res, next) => {
@@ -101,6 +102,13 @@ const deleteTeam = async (req, res, next) => {
         message: "Team deleted",
         deletedProjects,
       });
+
+      await AuditLog.create({
+        actorId: req.user.id,
+        action: "team_deleted",
+        teamId,
+        details: { teamName: team.name, deletedProjects },
+      });
     } finally {
       await session.endSession();
     }
@@ -108,8 +116,6 @@ const deleteTeam = async (req, res, next) => {
     next(err);
   }
 };
-
-
 
 // ADD MEMBER
 const addMember = async (req, res, next) => {
@@ -150,6 +156,14 @@ const addMember = async (req, res, next) => {
       teamId,
       userId: user._id,
       role: assigned,
+    });
+
+    await AuditLog.create({
+      actorId: req.user.id,
+      action: "member_added",
+      teamId,
+      targetUserId: user._id,
+      details: { email, role: assigned },
     });
 
     res.status(201).json({ message: "Member added", membership });
@@ -201,6 +215,14 @@ const removeMember = async (req, res, next) => {
     }
 
     await TeamMember.findByIdAndDelete(membership._id);
+
+    await AuditLog.create({
+      actorId: req.user.id,
+      action: "member_removed",
+      teamId,
+      targetUserId: userId,
+      details: { removedRole: membership.role },
+    });
 
     res.status(200).json({ message: "Member removed" });
   } catch (err) {
@@ -260,6 +282,14 @@ const transferOwnership = async (req, res, next) => {
     } finally {
       await session.endSession();
     }
+
+    await AuditLog.create({
+      actorId: req.user.id,
+      action: "ownership_transferred",
+      teamId,
+      targetUserId: newOwnerUserId,
+      details: { previousOwnerId: currentOwnerId, newOwnerId: newOwnerUserId },
+    });
   } catch (err) {
     next(err);
   }
@@ -279,6 +309,13 @@ const updateTeam = async (req, res, next) => {
     if (name !== undefined) team.name = name;
     if (description !== undefined) team.description = description;
     await team.save();
+
+    await AuditLog.create({
+      actorId: req.user.id,
+      action: "team_updated",
+      teamId,
+      details: { name, description },
+    });
 
     res.status(200).json({ message: "Team updated", team });
   } catch (err) {
@@ -310,8 +347,17 @@ const changeMemberRole = async (req, res, next) => {
       });
     }
 
+    const oldRole = membership.role;
     membership.role = role;
     await membership.save();
+
+    await AuditLog.create({
+      actorId: req.user.id,
+      action: "role_changed",
+      teamId,
+      targetUserId: userId,
+      details: { oldRole, newRole: role },
+    });
 
     res.status(200).json({ message: "Role updated", membership });
   } catch (err) {
@@ -338,6 +384,14 @@ const leaveTeam = async (req, res, next) => {
       });
     }
 
+    await AuditLog.create({
+      actorId: req.user.id,
+      action: "member_left",
+      teamId,
+      targetUserId: req.user.id,
+      details: { role: membership.role },
+    });
+
     await TeamMember.findByIdAndDelete(membership._id);
     res.status(200).json({ message: "Left team" });
   } catch (err) {
@@ -345,6 +399,31 @@ const leaveTeam = async (req, res, next) => {
   }
 };
 
-module.exports = { createTeam, getTeam, getMyTeams, deleteTeam, addMember, listMembers, removeMember, transferOwnership, updateTeam, changeMemberRole, leaveTeam };
+// GET AUDIT LOG
+const getAuditLog = async (req, res, next) => {
+  try {
+    const { teamId } = req.params;
+
+    const page = Math.max(1, parseInt(req.query.page) || 1);
+    const limit = Math.min(100, Math.max(1, parseInt(req.query.limit) || 20));
+    const skip = (page - 1) * limit;
+
+    const [logs, total] = await Promise.all([
+      AuditLog.find({ teamId })
+        .populate("actorId", "name email")
+        .populate("targetUserId", "name email")
+        .sort({ createdAt: -1 })
+        .skip(skip)
+        .limit(limit),
+      AuditLog.countDocuments({ teamId }),
+    ]);
+
+    res.status(200).json({ logs, total, page, pages: Math.ceil(total / limit) });
+  } catch (err) {
+    next(err);
+  }
+};
+
+module.exports = { createTeam, getTeam, getMyTeams, deleteTeam, addMember, listMembers, removeMember, transferOwnership, updateTeam, changeMemberRole, leaveTeam, getAuditLog };
 
 
