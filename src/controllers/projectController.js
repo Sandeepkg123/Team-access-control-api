@@ -25,8 +25,17 @@ const createProject = async (req, res, next) => {
 const listProjects = async (req, res, next) => {
   try {
     const { teamId } = req.params;
-    const projects = await Project.find({ teamId }).populate("createdBy", "name email");
-    res.status(200).json({ projects });
+
+    const page = Math.max(1, parseInt(req.query.page) || 1);
+    const limit = Math.min(100, Math.max(1, parseInt(req.query.limit) || 20));
+    const skip = (page - 1) * limit;
+
+    const [projects, total] = await Promise.all([
+      Project.find({ teamId }).populate("createdBy", "name email").skip(skip).limit(limit),
+      Project.countDocuments({ teamId }),
+    ]);
+
+    res.status(200).json({ projects, total, page, pages: Math.ceil(total / limit) });
   } catch (err) {
     next(err);
   }

@@ -164,9 +164,16 @@ const listMembers = async (req, res, next) => {
   try {
     const { teamId } = req.params;
 
-    const members = await TeamMember.find({ teamId }).populate("userId", "name email");
+    const page = Math.max(1, parseInt(req.query.page) || 1);
+    const limit = Math.min(100, Math.max(1, parseInt(req.query.limit) || 20));
+    const skip = (page - 1) * limit;
 
-    res.status(200).json({ members });
+    const [members, total] = await Promise.all([
+      TeamMember.find({ teamId }).populate("userId", "name email").skip(skip).limit(limit),
+      TeamMember.countDocuments({ teamId }),
+    ]);
+
+    res.status(200).json({ members, total, page, pages: Math.ceil(total / limit) });
   } catch (err) {
     next(err);
   }

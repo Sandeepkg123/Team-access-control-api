@@ -547,19 +547,22 @@ const bobId = bob.userId ?? promoteBob.json.membership?.userId;
   const rotNewToken = /refreshToken=([^;]+)/.exec(rotNewCookie)?.[1];
   check("rotation issues a NEW refresh token", rotNewToken !== undefined && rotNewToken !== rotToken, true);
 
-  // Replaying the consumed token must now fail.
-  const rotReplay = await api("POST", "/auth/refresh", {
-    cookie: `refreshToken=${rotToken}`,
-  });
-  check("replayed refresh token is rejected", rotReplay.status, 403);
-
-  // The new token still works.
+  // The new token still works (checked BEFORE the replay below, which now
+  // triggers reuse detection and revokes ALL tokens).
   const rot2 = await api("POST", "/auth/refresh", {
     cookie: `refreshToken=${rotNewToken}`,
   });
   check("rotated token still works", rot2.status, 200);
 
-  // Logout must invalidate whatever token is currently stored.
+  // Replaying the consumed token now triggers reuse detection (STEP 17), which
+  // revokes all tokens. This check still verifies the old token is rejected.
+  const rotReplay = await api("POST", "/auth/refresh", {
+    cookie: `refreshToken=${rotToken}`,
+  });
+  check("replayed refresh token is rejected", rotReplay.status, 403);
+
+  // Logout must invalidate whatever token is currently stored. Since reuse
+  // detection already revoked it, this confirms the stored token is unusable.
   const currentCookie = rot2.headers.get("set-cookie") || "";
   const currentToken = /refreshToken=([^;]+)/.exec(currentCookie)?.[1] ?? rotNewToken;
   await api("POST", "/auth/logout", { cookie: `refreshToken=${currentToken}` });
@@ -871,6 +874,68 @@ const bobId = bob.userId ?? promoteBob.json.membership?.userId;
   });
   check("forgot password for non-existent email 200", forgotNonExistent.status, 200);
   check("same message for non-existent email", forgotNonExistent.json.message, "If that email is registered, a reset link has been sent");
+
+  // ============================================ STEP 17: refresh token reuse detection
+  group("SECURITY: refresh token reuse detection");
+
+  const reuseLogin = await api("POST", "/auth/login", {
+    body: { email: bob.email, password: bob.password },
+  });
+  check("login for reuse test 200", reuseLogin.status, 200);
+  const reuseCookie = reuseLogin.headers.get("set-cookie") || "";
+  const reuseToken = /refreshToken=([^;]+)/.exec(reuseCookie)?.[1];
+  check("refresh cookie issued", typeof reuseToken, "string");
+
+  // First use: normal rotation
+  const reuseRotate = await api("POST", "/auth/refresh", {
+    cookie: `refreshToken=${reuseToken}`,
+  });
+  check("first refresh rotates 200", reuseRotate.status, 200);
+  const reuseNewCookie = reuseRotate.headers.get("set-cookie") || "";
+  const reuseNewToken = /refreshToken=([^;]+)/.exec(reuseNewCookie)?.[1];
+
+  // Replay the old token: reuse detected, all tokens revoked
+  const reuseReplay = await api("POST", "/auth/refresh", {
+    cookie: `refreshToken=${reuseToken}`,
+  });
+  check("reused old token is rejected 403", reuseReplay.status, 403);
+  check("error mentions reuse detection", /reuse detected/i.test(reuseReplay.json.error || ""), true);
+
+  // The new token from the legitimate rotation must ALSO be revoked
+  const reuseNewTokenCheck = await api("POST", "/auth/refresh", {
+    cookie: `refreshToken=${reuseNewToken}`,
+  });
+  check("legitimate rotated token also revoked after reuse detection", reuseNewTokenCheck.status, 403);
+
+  // ============================================ STEP 18: pagination
+  group("FEATURE: pagination on list endpoints");
+
+  // Create 25 projects for pagination test
+  const pageTeam = await api("POST", "/teams", { token: tokenA, body: { name: "Pagination Team" } });
+  const pageTeamId = pageTeam.json.team?._id;
+  for (let i = 0; i < 25; i++) {
+    await api("POST", `/teams/${pageTeamId}/projects`, {
+      token: tokenA,
+      body: { title: `Page Proj ${i + 1}` },
+    });
+  }
+
+  const page1 = await api("GET", `/teams/${pageTeamId}/projects?page=1&limit=10`, { token: tokenA });
+  check("page 1 returns 10 projects", page1.json.projects?.length, 10);
+  check("total is 25", page1.json.total, 25);
+  check("pages is 3", page1.json.pages, 3);
+
+  const page3 = await api("GET", `/teams/${pageTeamId}/projects?page=3&limit=10`, { token: tokenA });
+  check("page 3 returns 5 projects", page3.json.projects?.length, 5);
+
+  // Members pagination — bob, alice, frank, dave, grace are in team A (5 members)
+  const memberPage = await api("GET", `/teams/${teamA}/members?page=1&limit=2`, { token: bobToken });
+  check("members page 1 returns 2", memberPage.json.members?.length, 2);
+  check("total members is 5", memberPage.json.total, 5);
+  check("pages is 3", memberPage.json.pages, 3);
+
+  // Clean up pagination team
+  await api("DELETE", `/teams/${pageTeamId}`, { token: tokenA });
 
   // ----------------------------------------------------------------- teardown
   // There is no DELETE /auth/users endpoint, so we clean up straight through

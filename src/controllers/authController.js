@@ -70,8 +70,21 @@ const refresh = async (req, res, next) => {
     const decoded = jwt.verify(token, process.env.JWT_REFRESH_SECRET);
     const user = await User.findById(decoded.userId);
 
-    if (!user || user.refreshToken !== token) {
+    if (!user) {
       return res.status(403).json({ error: "Invalid refresh token" });
+    }
+
+    // REUSE DETECTION: the presented token is cryptographically valid (signature
+    // + expiry passed jwt.verify above) but it does not match the stored current
+    // token. That means this token was already rotated out — someone is replaying
+    // an old one. The only explanation is that the original was stolen, so revoke
+    // ALL tokens for this user (forces re-login everywhere) and reject.
+    if (user.refreshToken !== token) {
+      user.refreshToken = null;
+      await user.save();
+      return res.status(403).json({
+        error: "Refresh token reuse detected — all sessions revoked",
+      });
     }
 
     const newAccessToken = generateAccessToken(user._id);
