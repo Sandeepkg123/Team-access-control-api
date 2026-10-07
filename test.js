@@ -75,11 +75,12 @@ async function connectDb() {
   require("dns").setServers(["8.8.8.8", "8.8.4.4"]);
   require("dotenv").config({ quiet: true });
   const mongoose = require("mongoose");
-  const [Team, TeamMember, Project, User] = await Promise.all([
+  const [Team, TeamMember, Project, User, ProjectMember] = await Promise.all([
     require("./src/models/Team"),
     require("./src/models/TeamMember"),
     require("./src/models/Project"),
     require("./src/models/User"),
+    require("./src/models/ProjectMember"),
   ]);
   await mongoose.connect(process.env.MONGO_URI, {
     serverSelectionTimeoutMS: 30000,
@@ -87,7 +88,7 @@ async function connectDb() {
     retryReads: true,
     maxPoolSize: 10,
   });
-  _db = { mongoose, Team, TeamMember, Project, User };
+  _db = { mongoose, Team, TeamMember, Project, User, ProjectMember };
   return _db;
 }
 
@@ -970,6 +971,206 @@ const bobId = bob.userId ?? promoteBob.json.membership?.userId;
   const graceAudit = await api("GET", `/teams/${teamA}/audit-log`, { token: graceToken });
   check("plain member cannot access audit log (403)", graceAudit.status, 403);
 
+  // ============================================ STEP 20: per-project overrides
+  //
+  // The team role decides everything about a project, so a plain member can only
+  // edit the ones they created. That leaves no way to hand someone edit rights on
+  // ONE project without promoting them team-wide. ProjectMember adds that layer.
+  group("FEATURE: per-project permission overrides");
+
+  // A dedicated team so this cannot disturb Team A's assertions above. Bob owns
+  // it and is the creator of both projects, so he is the "owner/admin" arm.
+  const ovTeamRes = await api("POST", "/teams", { token: bobToken, body: { name: "Override Team" } });
+  const ovTeam = ovTeamRes.json.team?._id;
+  check("override team created 201", ovTeamRes.status, 201);
+
+  const ovProjectRes = await api("POST", `/teams/${ovTeam}/projects`, {
+    token: bobToken,
+    body: { title: "Bob's project", description: "he created it" },
+  });
+  const ovProject = ovProjectRes.json.project?._id;
+  check("bob creates project 201", ovProjectRes.status, 201);
+
+  // Grace and Erin join as plain members — they cannot edit Bob's project.
+  await api("POST", `/teams/${ovTeam}/members`, { token: bobToken, body: { email: grace.email, role: "member" } });
+  await api("POST", `/teams/${ovTeam}/members`, { token: bobToken, body: { email: erin.email, role: "member" } });
+  const graceT = await login(grace.email, grace.password);
+  const erinT = await login(erin.email, erin.password);
+
+  // Capture their userIds for the override calls.
+  const ovMembers = await api("GET", `/teams/${ovTeam}/members`, { token: bobToken });
+  const graceId = ovMembers.json.members?.find((m) => m.userId?.email === grace.email)?.userId?._id;
+  const erinId = ovMembers.json.members?.find((m) => m.userId?.email === erin.email)?.userId?._id;
+  check("override subject ids captured", typeof graceId === "string" && typeof erinId === "string", true);
+
+  // BASELINE: a member who did not create the project cannot edit it.
+  const graceEditBefore = await api("PATCH", `/teams/${ovTeam}/projects/${ovProject}`, {
+    token: graceT,
+    body: { title: "Grace was here" },
+  });
+  check("member cannot edit before override (403)", graceEditBefore.status, 403);
+
+  // Grant Grace the "editor" override.
+  const grantEditor = await api("POST", `/teams/${ovTeam}/projects/${ovProject}/members`, {
+    token: bobToken,
+    body: { userId: graceId, role: "editor" },
+  });
+  check("owner can grant project editor 201", grantEditor.status, 201);
+  check("override role is editor", grantEditor.json.membership?.role, "editor");
+
+  // The override now grants what the team role denied.
+  const graceEditAfter = await api("PATCH", `/teams/${ovTeam}/projects/${ovProject}`, {
+    token: graceT,
+    body: { title: "Grace edited this" },
+  });
+  check("member CAN edit after editor override (200)", graceEditAfter.status, 200);
+  check("editor's change was applied", graceEditAfter.json.project?.title, "Grace edited this");
+
+  // Erin is a plain member with no override on THIS project, so Grace's editor
+  // grant must not have leaked across projects.
+  const erinEdit = await api("PATCH", `/teams/${ovTeam}/projects/${ovProject}`, {
+    token: erinT,
+    body: { title: "Erin was here" },
+  });
+  check("other member still cannot edit (403)", erinEdit.status, 403);
+
+  // An editor CAN delegate — that is what makes "editor" mean full control of the
+  // project. Uses a SEPARATE project on purpose: granting Erin an override on
+  // ovProject here would silently change the meaning of the checks below.
+  const escProject = (await api("POST", `/teams/${ovTeam}/projects`, {
+    token: bobToken,
+    body: { title: "Escalation project" },
+  })).json.project?._id;
+
+  await api("POST", `/teams/${ovTeam}/projects/${escProject}/members`, {
+    token: bobToken,
+    body: { userId: graceId, role: "editor" },
+  });
+
+  const editorGrants = await api("POST", `/teams/${ovTeam}/projects/${escProject}/members`, {
+    token: graceT,
+    body: { userId: erinId, role: "editor" },
+  });
+  check("project editor CAN delegate access (201)", editorGrants.status, 201);
+
+  const erinEditsViaGrant = await api("PATCH", `/teams/${ovTeam}/projects/${escProject}`, {
+    token: erinT,
+    body: { title: "Erin edited via Grace's grant" },
+  });
+  check("delegated editor CAN edit (200)", erinEditsViaGrant.status, 200);
+
+  // A plain member with NO override anywhere must NOT be able to delegate.
+  // Uses Dave rather than Erin: Erin was just made an editor above, so testing
+  // her here would assert against a user who legitimately holds the permission.
+  await api("POST", `/teams/${ovTeam}/members`, { token: bobToken, body: { email: dave.email, role: "member" } });
+  const daveT = await login(dave.email, dave.password);
+
+  const memberDelegates = await api("POST", `/teams/${ovTeam}/projects/${escProject}/members`, {
+    token: daveT,
+    body: { userId: graceId, role: "viewer" },
+  });
+  check("plain member cannot delegate access (403)", memberDelegates.status, 403);
+
+  // Nor can a plain member edit, even with no override at all.
+  const daveEdit = await api("PATCH", `/teams/${ovTeam}/projects/${escProject}`, {
+    token: daveT,
+    body: { title: "Dave edited" },
+  });
+  check("plain member cannot edit (403)", daveEdit.status, 403);
+
+  // A "viewer" override must NOT grant edit access. Grant-only means it cannot
+  // add power, and since Erin was already denied, she stays denied.
+  const grantViewer = await api("POST", `/teams/${ovTeam}/projects/${ovProject}/members`, {
+    token: bobToken,
+    body: { userId: erinId, role: "viewer" },
+  });
+  check("owner can grant project viewer 201", grantViewer.status, 201);
+
+  const erinEditAfterViewer = await api("PATCH", `/teams/${ovTeam}/projects/${ovProject}`, {
+    token: erinT,
+    body: { title: "Erin still should not" },
+  });
+  check("viewer override does NOT grant edit (403)", erinEditAfterViewer.status, 403);
+
+  // Re-granting the same user with a different role must UPDATE, not collide
+  // with the unique {userId, projectId} index as a 409.
+  const upgradeToEditor = await api("POST", `/teams/${ovTeam}/projects/${ovProject}/members`, {
+    token: bobToken,
+    body: { userId: erinId, role: "editor" },
+  });
+  check("re-granting with a new role updates (200/201)", [200, 201].includes(upgradeToEditor.status), true);
+  check("role upgraded to editor", upgradeToEditor.json.membership?.role, "editor");
+
+  const erinEditNowWorks = await api("PATCH", `/teams/${ovTeam}/projects/${ovProject}`, {
+    token: erinT,
+    body: { title: "Erin can now edit" },
+  });
+  check("upgraded editor CAN edit (200)", erinEditNowWorks.status, 200);
+
+  // List the overrides.
+  const listOverrides = await api("GET", `/teams/${ovTeam}/projects/${ovProject}/members`, { token: bobToken });
+  check("list project members 200", listOverrides.status, 200);
+  check("both overrides present", listOverrides.json.members?.length, 2);
+
+  // Remove Grace's override — she falls back to the team role and is denied again.
+  const removeOverride = await api("DELETE", `/teams/${ovTeam}/projects/${ovProject}/members/${graceId}`, {
+    token: bobToken,
+  });
+  check("owner can remove override 200", removeOverride.status, 200);
+
+  const graceEditAfterRemove = await api("PATCH", `/teams/${ovTeam}/projects/${ovProject}`, {
+    token: graceT,
+    body: { title: "Grace again" },
+  });
+  check("removed override revokes edit (403)", graceEditAfterRemove.status, 403);
+
+  // An override cannot be granted to someone outside the team.
+  const outsider = { name: "Outsider", email: `outsider${stamp}${rand}@test.com`, password: "Secret123!" };
+  await signup(outsider);
+  const outsiderId = (await signup(outsider)).json.userId;
+  const grantOutsider = await api("POST", `/teams/${ovTeam}/projects/${ovProject}/members`, {
+    token: bobToken,
+    body: { userId: outsiderId, role: "editor" },
+  });
+  check("cannot grant access to a non-member (400)", grantOutsider.status, 400);
+
+  // Invalid role must be rejected before it reaches the Mongoose enum.
+  const badOverrideRole = await api("POST", `/teams/${ovTeam}/projects/${ovProject}/members`, {
+    token: bobToken,
+    body: { userId: erinId, role: "superuser" },
+  });
+  check("invalid override role rejected (400)", badOverrideRole.status, 400);
+
+  // Cross-team IDOR: an override must not be readable or grantable via another
+  // team's id, or owning any team would expose every project's access list.
+  const crossTeamList = await api("GET", `/teams/${teamA}/projects/${ovProject}/members`, { token: bobToken });
+  check("cross-team override list blocked (404)", crossTeamList.status, 404);
+
+  // Deleting a project must cascade its overrides, or they become unreachable
+  // rows pointing at a project that no longer exists.
+  const doomed = (await api("POST", `/teams/${ovTeam}/projects`, {
+    token: bobToken,
+    body: { title: "Doomed project" },
+  })).json.project?._id;
+  await api("POST", `/teams/${ovTeam}/projects/${doomed}/members`, {
+    token: bobToken,
+    body: { userId: erinId, role: "editor" },
+  });
+  await api("DELETE", `/teams/${ovTeam}/projects/${doomed}`, { token: bobToken });
+
+  const ovDb = await connectDb();
+  const orphanedOverrides = await ovDb.ProjectMember.countDocuments({ projectId: doomed });
+  check("deleting a project leaves no orphaned overrides", orphanedOverrides, 0);
+
+  // Deleting the TEAM must cascade overrides for all of its projects too.
+  const ovOrphanCount = await ovDb.ProjectMember.countDocuments({ projectId: { $in: [ovProject] } });
+  check("overrides exist before team delete", ovOrphanCount > 0, true);
+
+  await api("DELETE", `/teams/${ovTeam}`, { token: bobToken });
+
+  const afterTeamDelete = await ovDb.ProjectMember.countDocuments({ projectId: { $in: [ovProject] } });
+  check("deleting a team leaves no orphaned overrides", afterTeamDelete, 0);
+
   // ----------------------------------------------------------------- teardown
   // There is no DELETE /auth/users endpoint, so we clean up straight through
   // Mongoose. Everything is scoped by the unique stamp in the test emails, so
@@ -977,7 +1178,7 @@ const bobId = bob.userId ?? promoteBob.json.membership?.userId;
   // failure must never be mistaken for a test failure.
   group("Teardown");
   try {
-    const { mongoose, Team, TeamMember, Project, User } = await connectDb();
+    const { mongoose, Team, TeamMember, Project, User, ProjectMember } = await connectDb();
 
     const pattern = new RegExp(`\\+${stamp}[a-z0-9]*@`);
     const users = await User.find({ email: pattern }, { _id: 1 }).lean();
@@ -986,30 +1187,45 @@ const bobId = bob.userId ?? promoteBob.json.membership?.userId;
     const teams = await Team.find({ ownerId: { $in: userIds } }, { _id: 1 }).lean();
     const teamIds = teams.map((t) => t._id);
 
-    const [delProjects, delMembers, delTeams, delUsers] = await Promise.all([
+    // ProjectMember rows are cleaned by projectId here rather than by userId:
+    // an override's userId always points at a member of the same team, so
+    // covering the teams below also covers every user. Keying on the projects
+    // additionally catches rows that outlived their team (the orphan bug).
+    const projects = await Project.find({ teamId: { $in: teamIds } }, { _id: 1 }).lean();
+    const projectIds = projects.map((p) => p._id);
+
+    const [delProjects, delMembers, delTeams, delUsers, delOverrides] = await Promise.all([
       Project.deleteMany({ teamId: { $in: teamIds } }),
       TeamMember.deleteMany({ $or: [{ teamId: { $in: teamIds } }, { userId: { $in: userIds } }] }),
       Team.deleteMany({ _id: { $in: teamIds } }),
       User.deleteMany({ _id: { $in: userIds } }),
+      ProjectMember.deleteMany({
+        $or: [{ projectId: { $in: projectIds } }, { userId: { $in: userIds } }],
+      }),
     ]);
 
     // Assert only that nothing survives, not that a minimum was deleted. An
     // earlier regression test legitimately deletes its project, so the count can
     // legitimately be 0 by the time we get here. Must happen BEFORE disconnect.
-    const [leftUsers, leftMembers, leftTeams, leftProjects] = await Promise.all([
+    const [leftUsers, leftMembers, leftTeams, leftProjects, leftOverrides] = await Promise.all([
       User.countDocuments({ email: pattern }),
       TeamMember.countDocuments({ $or: [{ teamId: { $in: teamIds } }, { userId: { $in: userIds } }] }),
       Team.countDocuments({ _id: { $in: teamIds } }),
       Project.countDocuments({ teamId: { $in: teamIds } }),
+      ProjectMember.countDocuments({
+        $or: [{ projectId: { $in: projectIds } }, { userId: { $in: userIds } }],
+      }),
     ]);
 
     check("no throwaway users remain", leftUsers, 0);
     check("no memberships remain", leftMembers, 0);
     check("no teams remain", leftTeams, 0);
     check("no projects remain", leftProjects, 0);
+    check("no project overrides remain", leftOverrides, 0);
     console.log(
       `\n  Cleaned up ${delUsers.deletedCount} users, ${delTeams.deletedCount} teams,` +
-        ` ${delMembers.deletedCount} memberships, ${delProjects.deletedCount} projects from Atlas.`
+        ` ${delMembers.deletedCount} memberships, ${delProjects.deletedCount} projects,` +
+        ` ${delOverrides.deletedCount} project overrides from Atlas.`
     );
 
     await mongoose.disconnect();

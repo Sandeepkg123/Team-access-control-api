@@ -2,6 +2,7 @@ const mongoose = require("mongoose");
 const Team = require("../models/Team");
 const TeamMember = require("../models/TeamMember");
 const Project = require("../models/Project");
+const ProjectMember = require("../models/ProjectMember");
 const User = require("../models/User");
 const AuditLog = require("../models/AuditLog");
 
@@ -92,8 +93,23 @@ const deleteTeam = async (req, res, next) => {
     let deletedProjects = 0;
     try {
       await session.withTransaction(async () => {
+        // Collect the project's ids BEFORE deleting them. ProjectMember rows are
+        // keyed by projectId, so once the projects are gone there is nothing left
+        // to filter on and the overrides would survive as orphans — unreachable
+        // over HTTP but stored forever, which is the exact bug this cascade
+        // exists to prevent.
+        const projectIds = await Project.find({ teamId }, { _id: 1 }).lean();
+
         await Team.deleteOne({ _id: teamId }, { session });
         await TeamMember.deleteMany({ teamId }, { session });
+
+        if (projectIds.length > 0) {
+          await ProjectMember.deleteMany(
+            { projectId: { $in: projectIds.map((p) => p._id) } },
+            { session }
+          );
+        }
+
         const projectResult = await Project.deleteMany({ teamId }, { session });
         deletedProjects = projectResult.deletedCount;
       });
