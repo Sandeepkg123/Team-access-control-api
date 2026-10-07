@@ -75,12 +75,13 @@ async function connectDb() {
   require("dns").setServers(["8.8.8.8", "8.8.4.4"]);
   require("dotenv").config({ quiet: true });
   const mongoose = require("mongoose");
-  const [Team, TeamMember, Project, User, ProjectMember] = await Promise.all([
+  const [Team, TeamMember, Project, User, ProjectMember, AuditLog] = await Promise.all([
     require("./src/models/Team"),
     require("./src/models/TeamMember"),
     require("./src/models/Project"),
     require("./src/models/User"),
     require("./src/models/ProjectMember"),
+    require("./src/models/AuditLog"),
   ]);
   await mongoose.connect(process.env.MONGO_URI, {
     serverSelectionTimeoutMS: 30000,
@@ -88,7 +89,7 @@ async function connectDb() {
     retryReads: true,
     maxPoolSize: 10,
   });
-  _db = { mongoose, Team, TeamMember, Project, User, ProjectMember };
+  _db = { mongoose, Team, TeamMember, Project, User, ProjectMember, AuditLog };
   return _db;
 }
 
@@ -1178,9 +1179,16 @@ const bobId = bob.userId ?? promoteBob.json.membership?.userId;
   // failure must never be mistaken for a test failure.
   group("Teardown");
   try {
-    const { mongoose, Team, TeamMember, Project, User, ProjectMember } = await connectDb();
+    const { mongoose, Team, TeamMember, Project, User, ProjectMember, AuditLog } = await connectDb();
 
-    const pattern = new RegExp(`\\+${stamp}[a-z0-9]*@`);
+    // Match the bare stamp, NOT "+<stamp>". Several accounts here are built as
+    // `edge${stamp}@test.com` rather than `edge+${stamp}@...`, and a pattern that
+    // requires the "+" silently skips all of them — they survived every run while
+    // this same pattern was used by the "no throwaway users remain" assertion
+    // below, so the check passed on a database that still held the rows it was
+    // meant to prove were gone. The stamp is a 13-digit millisecond timestamp, so
+    // matching it anywhere is specific enough and cannot catch a real account.
+    const pattern = new RegExp(`${stamp}`);
     const users = await User.find({ email: pattern }, { _id: 1 }).lean();
     const userIds = users.map((u) => u._id);
 
@@ -1194,7 +1202,7 @@ const bobId = bob.userId ?? promoteBob.json.membership?.userId;
     const projects = await Project.find({ teamId: { $in: teamIds } }, { _id: 1 }).lean();
     const projectIds = projects.map((p) => p._id);
 
-    const [delProjects, delMembers, delTeams, delUsers, delOverrides] = await Promise.all([
+    const [delProjects, delMembers, delTeams, delUsers, delOverrides, delAudit] = await Promise.all([
       Project.deleteMany({ teamId: { $in: teamIds } }),
       TeamMember.deleteMany({ $or: [{ teamId: { $in: teamIds } }, { userId: { $in: userIds } }] }),
       Team.deleteMany({ _id: { $in: teamIds } }),
@@ -1202,12 +1210,17 @@ const bobId = bob.userId ?? promoteBob.json.membership?.userId;
       ProjectMember.deleteMany({
         $or: [{ projectId: { $in: projectIds } }, { userId: { $in: userIds } }],
       }),
+      // AuditLog owns no reference that cascades, so nothing else here removes it.
+      // Keyed on teamId OR actorId: a `team_deleted` entry necessarily points at a
+      // team that no longer exists, so filtering by the teams deleted above would
+      // miss it, and a team deleted mid-suite leaves no teamId left to match on.
+      AuditLog.deleteMany({ $or: [{ teamId: { $in: teamIds } }, { actorId: { $in: userIds } }] }),
     ]);
 
     // Assert only that nothing survives, not that a minimum was deleted. An
     // earlier regression test legitimately deletes its project, so the count can
     // legitimately be 0 by the time we get here. Must happen BEFORE disconnect.
-    const [leftUsers, leftMembers, leftTeams, leftProjects, leftOverrides] = await Promise.all([
+    const [leftUsers, leftMembers, leftTeams, leftProjects, leftOverrides, leftAudit] = await Promise.all([
       User.countDocuments({ email: pattern }),
       TeamMember.countDocuments({ $or: [{ teamId: { $in: teamIds } }, { userId: { $in: userIds } }] }),
       Team.countDocuments({ _id: { $in: teamIds } }),
@@ -1215,6 +1228,7 @@ const bobId = bob.userId ?? promoteBob.json.membership?.userId;
       ProjectMember.countDocuments({
         $or: [{ projectId: { $in: projectIds } }, { userId: { $in: userIds } }],
       }),
+      AuditLog.countDocuments({ $or: [{ teamId: { $in: teamIds } }, { actorId: { $in: userIds } }] }),
     ]);
 
     check("no throwaway users remain", leftUsers, 0);
@@ -1222,17 +1236,19 @@ const bobId = bob.userId ?? promoteBob.json.membership?.userId;
     check("no teams remain", leftTeams, 0);
     check("no projects remain", leftProjects, 0);
     check("no project overrides remain", leftOverrides, 0);
+    check("no audit entries remain", leftAudit, 0);
     console.log(
       `\n  Cleaned up ${delUsers.deletedCount} users, ${delTeams.deletedCount} teams,` +
         ` ${delMembers.deletedCount} memberships, ${delProjects.deletedCount} projects,` +
-        ` ${delOverrides.deletedCount} project overrides from Atlas.`
+        ` ${delOverrides.deletedCount} project overrides, ${delAudit.deletedCount} audit entries from Atlas.`
     );
 
     await mongoose.disconnect();
   } catch (err) {
     console.log(`\n  Teardown skipped: ${err.message}`);
     console.log(`  Manual cleanup — run this in mongosh or Atlas Data Explorer:`);
-    console.log(`    db.users.deleteMany({ email: { $regex: "\\\\+${stamp}" } })`);
+    console.log(`    db.users.deleteMany({ email: { $regex: "${stamp}" } })`);
+    console.log(`    db.auditlogs.deleteMany({})`);
   }
 
   // ------------------------------------------------------------------- report

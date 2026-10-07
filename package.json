@@ -6,7 +6,9 @@
   "scripts": {
     "dev": "nodemon server.js",
     "start": "node server.js",
-    "test": "node test.js"
+    "test": "node test.js",
+    "smoke": "node smoke.js",
+    "verify": "node test.js && node smoke.js"
   },
   "keywords": [],
   "author": "",
