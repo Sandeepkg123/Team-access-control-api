@@ -12,11 +12,19 @@
  * running server, then deletes everything it created.
  */
 
+require("dotenv").config({ quiet: true });
 const BASE = process.env.BASE_URL || "http://localhost:5000";
 // The suite deliberately trips the auth rate limiters (it asserts they exist),
 // so it identifies itself and the limiters skip it. Otherwise the tests would
 // lock themselves out partway through the run.
-const SUITE = { "x-test-suite": "team-access-control-api" };
+//
+// The header now carries the shared secret from .env rather than a fixed string:
+// the server compares it for equality, so an attacker cannot guess it and skip
+// the limiters. If TEST_SUITE_SECRET is unset the server honours no bypass at
+// all and this suite will start getting 429s — add it to .env to run locally.
+const SUITE = process.env.TEST_SUITE_SECRET
+  ? { "x-test-suite": process.env.TEST_SUITE_SECRET }
+  : {};
 const stamp = Date.now();
 const rand = Math.random().toString(36).slice(2, 8);
 

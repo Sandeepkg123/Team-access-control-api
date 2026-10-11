@@ -1,12 +1,36 @@
 const rateLimit = require("express-rate-limit");
+const crypto = require("crypto");
 
 // The automated test suite deliberately trips these limiters to prove they work.
-// It sends x-test-suite on every request and is skipped, otherwise it would lock
-// itself out partway through a run.
+// It presents a shared secret and is skipped, otherwise it would lock itself out
+// partway through a run.
+//
+// SECURITY: the secret is REQUIRED and compared for equality. The previous check
+// was `Boolean(req.headers["x-test-suite"])` — the mere PRESENCE of a
+// client-chosen header skipped every limiter, so anyone could defeat the login
+// brute-force guard, the signup cap and the write cap by sending one header.
+// Keying on a value the client cannot guess restores the limiter's purpose: an
+// attacker can no longer opt themselves out of it.
+//
+// TEST_SUITE_SECRET is intentionally NOT in config/env.js's REQUIRED list.
+// A production deployment that never sets it gets no bypass at all, which is
+// the safe default; only the suites need it, and they read it from .env too.
 const common = {
   standardHeaders: true,
   legacyHeaders: false,
-  skip: (req) => Boolean(req.headers["x-test-suite"]),
+  skip: (req) => {
+    const secret = process.env.TEST_SUITE_SECRET;
+    if (!secret) return false;
+    const presented = req.get("x-test-suite");
+    if (typeof presented !== "string" || presented.length === 0) return false;
+    // Constant-time comparison so the secret cannot be recovered by timing the
+    // response. Length is compared first because timingSafeEqual throws when the
+    // two buffers differ in size.
+    const a = Buffer.from(presented);
+    const b = Buffer.from(secret);
+    if (a.length !== b.length) return false;
+    return crypto.timingSafeEqual(a, b);
+  },
 };
 
 // Login is the most valuable target: it takes an unbounded number of password

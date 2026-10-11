@@ -1,3 +1,10 @@
 node_modules/
+
+# Secrets — never commit any environment file that holds real credentials.
+# Covers .env.local / .env.production and friends, not just .env. The negation
+# keeps the placeholder template tracked.
 .env
+.env.*
+!.env.example
+
 plan.md

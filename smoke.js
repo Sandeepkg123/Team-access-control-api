@@ -21,13 +21,21 @@
  * Override the target with:  BASE_URL=http://host:port npm run smoke
  */
 
+require("dotenv").config({ quiet: true });
 const BASE = process.env.BASE_URL || "http://localhost:5000";
 
 // The write limiter caps at 30 requests / 15 min, and this suite fires well over
 // 30 writes (signup, team create, several project and member calls). Without the
 // exemption header the suite would lock itself out halfway through and every
 // later endpoint would report a misleading 429.
-const SUITE = { "x-test-suite": "team-access-control-api" };
+//
+// The header carries the shared secret from .env: the server compares it for
+// equality rather than just checking the header is present, so this cannot be
+// used by a client to bypass the limiters. Unset TEST_SUITE_SECRET means no
+// bypass is honoured at all and this suite will hit 429s.
+const SUITE = process.env.TEST_SUITE_SECRET
+  ? { "x-test-suite": process.env.TEST_SUITE_SECRET }
+  : {};
 const stamp = Date.now();
 const rand = Math.random().toString(36).slice(2, 8);
 

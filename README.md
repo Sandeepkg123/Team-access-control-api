@@ -320,6 +320,10 @@ NODE_ENV=development
 # Only needed behind a reverse proxy — number of hops, or "true" for one.
 # Leave blank on localhost.
 TRUST_PROXY=
+
+# Only needed to run the test suites. Leave BLANK in production: an unset value
+# disables the rate-limiter bypass entirely.
+TEST_SUITE_SECRET=some_random_string
 ```
 
 `config/env.js` refuses to boot if a required variable is missing, if either JWT secret is under 32 characters, or if both secrets are identical (which would let a stolen access token be replayed as a refresh token).
@@ -405,17 +409,26 @@ workflow and verified by reverting the fix to confirm the tests catch it.
 11. **Orphaned project overrides — fixed.** Deleting a project or its team left
     `ProjectMember` rows pointing at projects that no longer existed. Both
     cascades now collect ids first and delete the rows in the same transaction.
+12. **Rate limiters could be bypassed by any client — fixed.** The exemption the
+    test suites rely on was `skip: (req) => Boolean(req.headers["x-test-suite"])`,
+    so the mere **presence** of a client-chosen header disabled *every* limiter.
+    Sending `x-test-suite: anything` therefore unlocked unlimited login attempts
+    (defeating the 5-per-15-minutes brute-force guard), unlimited signup, an
+    unbounded forgot-password email flood, and unlimited writes. The check is now
+    an equality comparison against `TEST_SUITE_SECRET` using
+    `crypto.timingSafeEqual`, so an unconfigured deployment grants no bypass at
+    all and the secret cannot be recovered by timing the response.
 
 ### Still open
 
-12. **No email verification on signup** — which is what makes issue 2 possible in
+13. **No email verification on signup** — which is what makes issue 2 possible in
     the first place. Every transactional email provider requires either a
     verified sending domain or a verified sender before delivering to third
     parties, so an invite-only flow is not currently buildable here.
-13. **Route ordering is fragile.** `/my-teams` must stay declared before
+14. **Route ordering is fragile.** `/my-teams` must stay declared before
     `/:teamId`. There is a comment in `teamRoutes.js` warning about this, but
     nothing enforces it — reordering the lines would break the route.
-14. **Rate-limit counters are in-memory.** They reset on restart and are not
+15. **Rate-limit counters are in-memory.** They reset on restart and are not
     shared across instances. A multi-instance deployment needs a shared store
     such as Redis.
 
@@ -449,8 +462,13 @@ run is meaningful rather than a test that always agrees.
 > If you see `429 Too many login attempts`, restart `npm run dev` — the limiter
 > allows 5 logins per 15 minutes and its counter is in-memory.
 
-> Both suites send `x-test-suite`, which the limiters skip. Without that
-> exemption the suites would lock themselves out partway through a run.
+> Both suites send `x-test-suite`, whose value must equal `TEST_SUITE_SECRET`
+> from `.env` for the limiters to skip them. Without that exemption the suites
+> would lock themselves out partway through a run. The value is compared for
+> equality (in constant time), so it cannot be guessed — an earlier version
+> skipped on the header merely being *present*, which let any client opt itself
+> out of every limiter. With `TEST_SUITE_SECRET` unset the server honours no
+> bypass at all, which is the right default in production.
 
 ## Possible Next Steps
 
